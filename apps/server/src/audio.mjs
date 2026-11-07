@@ -13,7 +13,7 @@ export function parseAudioFrame(buffer, mode = 'live') {
   return { track: buffer[1] === 0 ? 'remote' : 'self', seq: buffer.readUInt32BE(4), startMs: buffer.readUInt32BE(8), sampleCount, pcm: buffer.subarray(16) };
 }
 
-export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory, recordSegment, status, gap, maxSessionMinutes = 120, retentionDays = 7, maxUserBytes = 512 * 1024 * 1024, maxDailyMinutes = 480 }) {
+export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory, recordSegment, status, gap, maxSessionMinutes = 120, retentionDays = 7, maxUserBytes = 512 * 1024 * 1024, maxDailyMinutes = 480, asrEnabled = () => true, asrRequired = () => true, asrRequested = () => true, onStored = () => {} }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
   const connections = new Map(), archiveChains = new Map();
   let closed = false;
@@ -21,7 +21,7 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
   db.exec(`DELETE FROM interview_audio_storage;
     UPDATE interviews SET frame_count=(SELECT count(*) FROM interview_audio_frames f WHERE f.session_id=interviews.id);
     INSERT INTO interview_audio_storage(user_id,bytes) SELECT i.user_id,sum(f.byte_count) FROM interview_audio_frames f JOIN interviews i ON i.id=f.session_id WHERE f.byte_offset IS NOT NULL GROUP BY i.user_id;
-    INSERT OR IGNORE INTO interview_audio_usage(user_id,day,samples) SELECT i.user_id,substr(f.created_at,1,10),sum(f.sample_count) FROM interview_audio_frames f JOIN interviews i ON i.id=f.session_id GROUP BY i.user_id,substr(f.created_at,1,10);`);
+    INSERT OR IGNORE INTO interview_audio_usage(user_id,day,samples) SELECT i.user_id,substr(f.created_at,1,10),sum(f.sample_count) FROM interview_audio_frames f JOIN interviews i ON i.id=f.session_id WHERE f.asr_submitted=1 GROUP BY i.user_id,substr(f.created_at,1,10);`);
   const send = (connection, event) => { if (connection.ws.readyState === WebSocket.OPEN && connection.ws.bufferedAmount < 256 * 1024) connection.ws.send(JSON.stringify(event)); };
   const valid = c => {
     const row = db.prepare('SELECT i.status,i.device_id,u.disabled,d.user_id FROM interviews i JOIN users u ON u.id=i.user_id LEFT JOIN devices d ON d.id=? WHERE i.id=? AND i.user_id=?').get(c.deviceId, c.sessionId, c.userId);
@@ -64,9 +64,9 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
       }
       const day=now().slice(0,10);
       const daily=db.prepare('SELECT samples FROM interview_audio_usage WHERE user_id=? AND day=?').get(c.userId,day)?.samples || 0;
-      if(daily+frame.sampleCount>maxDailyMinutes*60*16000)fail(429,'已达到今日音频识别额度，请明日继续或调整云端额度');
+      if(c.asrRequired && c.asrEnabled && daily+frame.sampleCount>maxDailyMinutes*60*16000)fail(429,'已达到今日音频识别额度，请明日继续或调整云端额度');
       if(db.prepare('SELECT frame_count FROM interviews WHERE id=?').get(c.sessionId).frame_count>=300000)fail(429,'本场面试音频帧数达到上限');
-      if (retentionDays > 0) {
+      { // Keep working PCM until session completion, even when archival retention is zero.
         const stored = db.prepare('SELECT bytes FROM interview_audio_storage WHERE user_id=?').get(c.userId)?.bytes || 0;
         if (stored + frame.pcm.length > maxUserBytes) fail(429, '原始录音存储额度已满，请导出并删除旧录音后继续');
         const directory = path.join(dataDir, 'users', c.userId, 'interviews', c.sessionId);
@@ -77,7 +77,10 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
       if (!valid(c)) fail(403, '录音设备或会话状态已失效');
       db.transaction(()=>{
         db.prepare('INSERT INTO interview_audio_frames(session_id,track,seq,start_ms,sample_count,byte_offset,byte_count,hash,replay,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(c.sessionId, frame.track, frame.seq, frame.startMs, frame.sampleCount, byteOffset, frame.pcm.length, digest, c.mode === 'replay' ? 1 : 0, now());
-        db.prepare('UPDATE interviews SET frame_count=frame_count+1 WHERE id=?').run(c.sessionId);
+        let energy=0;for(let i=0;i<frame.pcm.length;i+=2){const sample=frame.pcm.readInt16LE(i);energy+=sample*sample;}const energetic=Math.sqrt(energy/frame.sampleCount)>150;
+        db.prepare('UPDATE interview_audio_frames SET active=? WHERE session_id=? AND track=? AND seq=?').run(energetic?1:0,c.sessionId,frame.track,frame.seq);
+        const firstFrame=db.prepare('SELECT frame_count FROM interviews WHERE id=?').get(c.sessionId).frame_count===0;
+        db.prepare('UPDATE interviews SET frame_count=frame_count+1 WHERE id=?').run(c.sessionId);if(firstFrame)queueMicrotask(()=>onStored(c.sessionId));
         if(byteOffset!==null)db.prepare('INSERT INTO interview_audio_storage(user_id,bytes) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET bytes=bytes+excluded.bytes').run(c.userId,frame.pcm.length);
       })();
     });
@@ -139,21 +142,22 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
           let event; try { event = JSON.parse(bytes.toString()); } catch { return breakConnection(c, '音频控制消息无效'); }
           if (event.type === 'audio.start') {
             if (c.started || c.starting || event.sampleRate !== 16000 || event.format !== 'pcm_s16le' || !Array.isArray(event.tracks) || event.tracks.length !== 2 || !event.tracks.includes('remote') || !event.tracks.includes('self')) return breakConnection(c, '音频启动参数不正确或已启动');
-            c.starting = true; status(c.sessionId, 'connecting', null, c.mode);
+            c.starting = true; c.asrEnabled=asrEnabled(c.sessionId); c.asrRequired=asrRequired(c.sessionId);status(c.sessionId, 'connecting', null, c.mode);
             const hotwords = JSON.parse(db.prepare('SELECT hotwords FROM interviews WHERE id=?').get(c.sessionId).hotwords);
-            const starts = ['remote', 'self'].map(async track => {
+            const starts = (c.asrEnabled?['remote', 'self']:[]).map(async track => {
               const task = await asrFactory({ track, sessionId: c.sessionId, mode: c.mode, hotwords,
                 onResult: result => { if (!c.finalized && (!c.stopping || c.finalizing)) recordSegment(c.sessionId, track, `${c.id}:${result.segmentId}`, result, c.mode === 'replay'); },
-                onError: error => { if (!c.stopping) breakConnection(c, error?.message || '语音识别连接中断'); }
+                onError: error => { if (!c.stopping) { if(c.asrRequired)breakConnection(c,error?.message || '语音识别连接中断');else{c.tasks.get(track)?.close();c.tasks.delete(track);status(c.sessionId,'transcription_warning','后台转写中断，音频仍继续保存',c.mode);} } }
               });
               if (c.stopping) { task.close(); return; } c.tasks.set(track, task);
             });
             c.chain = c.chain.then(async () => {
               const results = await Promise.allSettled(starts);
-              if (results.some(r => r.status === 'rejected')) throw Object.assign(new Error('无法启动双路语音识别，请检查服务端配置、认证和网络'), { status: 503 });
+              if (results.some(r => r.status === 'rejected') && c.asrRequired) throw Object.assign(new Error('无法启动双路语音识别，请检查服务端配置、认证和网络'), { status: 503 });
               if (c.stopping || !valid(c)) { for (const task of c.tasks.values()) task.close(); return; }
               c.started = true; c.starting = false; clearTimeout(c.startTimer); status(c.sessionId, c.mode === 'live' ? 'recording' : 'backfilling', null, c.mode);
               send(c, { type: 'audio.ready', sessionId: c.sessionId, mode: c.mode });
+              if(results.some(r=>r.status==='rejected')||(!c.asrEnabled&&asrRequested(c.sessionId)))status(c.sessionId,'transcription_warning','后台转写未能启动，音频继续保存，直答仍可使用',c.mode);
             }).catch(error => breakConnection(c, error.message));
           } else if (event.type === 'audio.stop') { void finalize(c, true).catch(() => breakConnection(c, '结束录音失败')); }
           else if (event.type === 'ping') send(c, { type: 'pong' });
@@ -166,9 +170,11 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
         c.chain = c.chain.then(async () => {
           if (c.stopping && !c.finalizing) return;
           const accepted = await acceptFrame(c, frame);
-          if (accepted) {
+          if (accepted && c.tasks.has(frame.track)) {
+            try{
             db.transaction(()=>{const day=now().slice(0,10),used=db.prepare('SELECT samples FROM interview_audio_usage WHERE user_id=? AND day=?').get(c.userId,day)?.samples||0;if(used+frame.sampleCount>maxDailyMinutes*60*16000)fail(429,'已达到今日音频识别额度，请明日继续或调整云端额度');db.prepare('INSERT INTO interview_audio_usage(user_id,day,samples) VALUES(?,?,?) ON CONFLICT(user_id,day) DO UPDATE SET samples=samples+excluded.samples').run(c.userId,day,frame.sampleCount);})();
             await c.tasks.get(frame.track).write(frame.pcm, frame.startMs); db.prepare('UPDATE interview_audio_frames SET asr_submitted=1 WHERE session_id=? AND track=? AND seq=?').run(c.sessionId,frame.track,frame.seq);
+            }catch(error){if(c.asrRequired)throw error;c.tasks.get(frame.track)?.close();c.tasks.delete(frame.track);status(c.sessionId,'transcription_warning','后台转写失败或额度不足，音频继续保存，直答仍可使用',c.mode);}
           }
           send(c, { type: 'audio.ack', track: frame.track, seq: frame.seq });
         }).catch(error => breakConnection(c, error.message || '音频保存失败')).finally(() => { c.queuedBytes -= bytes.length; });

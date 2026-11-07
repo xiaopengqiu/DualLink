@@ -64,6 +64,7 @@ function updateTray(){if(!tray)return;tray.setToolTip(`双端互联 · ${state.c
   {label:'打开双端互联',click:showWindow},
   {label:`全屏截图  ${settings.fullShortcut}`,enabled:!!credential,click:()=>capture('full').catch(message)},
   {label:`框选截图  ${settings.regionShortcut}`,enabled:!!credential,click:()=>capture('region').catch(message)},
+  {label:`回答当前问题  ${settings.answerShortcut}`,enabled:!!credential&&!!audioController?.state.interview,click:()=>audioController.trigger().catch(message)},
   {type:'separator'},{label:state.connected?'云端已连接':'云端未连接',enabled:false},{label:`待上传：${queue?.items.length||0} 张`,enabled:false},
   {type:'separator'},{label:'退出',click:()=>{quitting=true;app.quit();}}
 ]));}
@@ -72,6 +73,7 @@ function bindShortcuts(){
   for(const [key,mode] of [['fullShortcut','full'],['regionShortcut','region']]){
     try{if(!globalShortcut.register(settings[key],()=>capture(mode).catch(message)))state.shortcutsError+=' '+settings[key]+' 已被占用。';}catch{state.shortcutsError+=' '+settings[key]+' 格式无效。';}
   }
+  try{if(!globalShortcut.register(settings.answerShortcut,()=>audioController?.trigger().catch(message)))state.shortcutsError+=' '+settings.answerShortcut+' 已被占用。';}catch{state.shortcutsError+=' '+settings.answerShortcut+' 格式无效。';}
 }
 function disconnect(){generation++;clearTimeout(reconnectTimer);if(socket){socket.removeAllListeners();socket.close();socket=null;}peerCount=0;state.connected=false;state.connecting=false;emit('network-reset',{});}
 async function revoked(){
@@ -191,6 +193,8 @@ function registerIpc(){
   handle('audio-status',()=>audioController.view());
   handle('audio-refresh',()=>audioController.refresh());
   handle('audio-prepare',()=>{if(!credential)throw new Error('请先配对设备');audioPermissionUntil=Date.now()+60000;return {allowed:true};});
+  handle('audio-trigger',()=>audioController.trigger());
+  handle('audio-capture-flushed',input=>audioController.markFlushed(input));
   handle('audio-start',async input=>{audioPermissionUntil=Date.now()+60000;return audioController.start(input||{});});
   handle('audio-capture-started',token=>audioController.markStarted(token));
   handle('audio-capture-stopped',token=>audioController.markStopped(token));

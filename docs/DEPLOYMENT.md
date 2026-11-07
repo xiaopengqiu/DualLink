@@ -19,7 +19,7 @@ docker version
 
 ## 2. 上传源码并安装
 
-上传 `release/DualLink-source-1.1.0.zip`，解压到临时目录，在源码根目录运行：
+上传 `release/DualLink-source-1.2.0.zip`，解压到临时目录，在源码根目录运行：
 
 ```bash
 sudo bash deploy/install.sh assistant.example.com docker
@@ -95,7 +95,9 @@ API 环境凭据会按白名单传入任务容器。也支持把指定的 `CODEX
 
 网站的账号与 AI 供应商账号是两层。若向其他用户提供 Claude 服务，请采用其官方允许的 API 认证方式；不要将个人 claude.ai 订阅做成多人共享额度池。[Claude 官方说明](https://code.claude.com/docs/en/agent-sdk/overview)
 
-### 1.1 实时语音配置
+### 实时语音与1.2双模式配置
+
+音频直答模型、后台转写开关及账号默认配置见 [双模式指南](DUAL_MODES_GUIDE.md)。首次使用请给百炼Key开通音频模型权限；音频直答不复用 Codex/Claude 登录。
 
 语音识别额外使用百炼流式服务，密钥不下发到客户端。将 `DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID` 和匹配的 `ASR_REGION` 写入 `/etc/dual-link.env`。完整模板、回答模型选项、热进程与保留策略见 [实时语音指南](VOICE_GUIDE.md)。旧配置文件升级时会保留，须手动加入语音项。原始音频默认保留 7 天；数据库历史另行保存。
 

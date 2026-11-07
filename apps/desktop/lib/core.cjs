@@ -1,5 +1,5 @@
 'use strict';
-const DEFAULT_SETTINGS=Object.freeze({cloudUrl:'',deviceName:'我的电脑',displayId:'',fullShortcut:'Ctrl+Alt+S',regionShortcut:'Ctrl+Alt+R',provider:'codex',analyze:true,lanFirst:false,autoStart:false});
+const DEFAULT_SETTINGS=Object.freeze({cloudUrl:'',deviceName:'我的电脑',displayId:'',fullShortcut:'Ctrl+Alt+S',regionShortcut:'Ctrl+Alt+R',answerShortcut:'Ctrl+Alt+Enter',provider:'codex',analyze:true,lanFirst:false,autoStart:false});
 function normalizeCloudUrl(value){
   if(typeof value!=='string'||value.length>2048)throw new Error('请输入有效的云服务地址');
   let url;try{url=new URL(value.trim());}catch{throw new Error('请输入完整地址，例如 https://assist.example.com');}
@@ -13,10 +13,11 @@ function validateSettings(value){
   if(typeof settings.deviceName!=='string'||!settings.deviceName.trim()||settings.deviceName.length>80)throw new Error('电脑名称需为 1–80 个字符');
   settings.deviceName=settings.deviceName.trim();
   if(!['codex','claude'].includes(settings.provider))throw new Error('请选择 Codex 或 Claude');
-  for(const key of ['fullShortcut','regionShortcut']){
+  for(const key of ['fullShortcut','regionShortcut','answerShortcut']){
     if(typeof settings[key]!=='string'||settings[key].length>80||!/(Ctrl|Control|CommandOrControl|Alt|Shift|Super|Command)\+/i.test(settings[key]))throw new Error('快捷键需包含 Ctrl、Alt 或 Shift 等修饰键');
   }
-  if(settings.fullShortcut.toLowerCase()===settings.regionShortcut.toLowerCase())throw new Error('全屏与框选快捷键不能相同');
+  const normalized=['fullShortcut','regionShortcut','answerShortcut'].map(key=>settings[key].toLowerCase().replace(/commandorcontrol|control/g,'ctrl').replace(/\s+/g,'').split('+').sort().join('+'));
+  if(new Set(normalized).size!==3)throw new Error('截图与回答快捷键不能相同');
   for(const key of ['analyze','lanFirst','autoStart'])if(typeof settings[key]!=='boolean')throw new Error('设置值无效');
   settings.displayId=String(settings.displayId||'');
   return settings;

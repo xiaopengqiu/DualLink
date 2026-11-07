@@ -10,7 +10,7 @@ class AudioController {
   constructor({root,getOwner,api,emit,onUnauthorized}) {
     this.root=path.resolve(root);this.getOwner=getOwner;this.api=api;this.emit=emit;this.onUnauthorized=onUnauthorized;
     this.state={phase:'idle',connected:false,interview:null,error:'',recoveries:[],interviews:[],config:null,pending:0,bytes:0,recording:false};
-    this.generation=0;this.owner=null;this.spool=null;this.connection=null;this.reconnectTimer=null;this.reconnectAttempt=0;this.replaying=new Set();this.replayConnections=new Set();this.pendingWrites=0;this.inflightFrames=new Set();this.lastNotice=0;this.closed=false;
+    this.generation=0;this.triggerRevision=0;this.owner=null;this.spool=null;this.connection=null;this.reconnectTimer=null;this.reconnectAttempt=0;this.replaying=new Set();this.replayConnections=new Set();this.pendingWrites=0;this.inflightFrames=new Set();this.answerStates=new Map();this.lastNotice=0;this.closed=false;
   }
   view(){return {...this.state,token:this.token||null,epochMs:this.spool?.meta.startedAt||null,pending:this.spool?.pendingCount??this.state.pending,bytes:this.spool?.bytes??this.state.bytes};}
   notify(force=false){if(force||Date.now()-this.lastNotice>350){this.lastNotice=Date.now();this.emit('audio.state',this.view());}}
@@ -26,15 +26,20 @@ class AudioController {
   async start(input={}) {
     if(this.state.interview&&!['ended','idle','error'].includes(this.state.phase))throw new Error('请先结束当前录音会话');
     const owner=this.getOwner();if(!owner)throw new Error('请先配对电脑');
-    const generation=++this.generation;let startedId;this.owner=owner;this.state.phase='connecting';this.state.error='';this.notify(true);
+    const generation=++this.generation;this.invalidateTrigger();let startedId;this.owner=owner;this.state.phase='connecting';this.state.error='';this.notify(true);
     try {
       const config=await this.api(owner,'/interviews/config');this.check(owner,generation);
-      if(!config.configured)throw new Error('云端尚未配置语音识别密钥，请配置百炼服务后重试');
       this.state.config=config;
+      const defaults={mode:'transcript',provider:config.defaultProvider||'codex',transcribe:true,audioWindowSeconds:120,...config.defaults};
       let interview;
       if(input.sessionId){validateSessionId(input.sessionId);interview=(await this.api(owner,`/interviews/${input.sessionId}`)).interview;this.check(owner,generation);if(interview.status==='ended')throw new Error('此面试已经结束');if(interview.status==='paused')interview=(await this.api(owner,`/interviews/${interview.id}/resume`,{method:'POST',body:{}})).interview;}
-      else interview=(await this.api(owner,'/interviews',{method:'POST',body:{title:input.title||'面试记录',provider:input.provider||'codex',autoAnswer:input.autoAnswer!==false,...(input.promptId?{promptId:input.promptId}:{})}})).interview;
+      else {
+        const mode=input.mode||defaults.mode;
+        if(mode==='audio'?!config.audioConfigured:!config.configured)throw new Error(mode==='audio'?'云端尚未配置音频直答模型密钥，请配置百炼模型后重试':'云端尚未配置语音识别密钥，请配置百炼服务后重试');
+        interview=(await this.api(owner,'/interviews',{method:'POST',body:{title:input.title||'面试记录',mode,provider:input.provider||defaults.provider,transcribe:mode==='transcript'?true:(input.transcribe??defaults.transcribe),audioModel:input.audioModel||defaults.audioModel,audioWindowSeconds:input.audioWindowSeconds??defaults.audioWindowSeconds,autoAnswer:mode==='transcript'&&input.autoAnswer===true,...(input.promptId?{promptId:input.promptId}:{})}})).interview;
+      }
       this.check(owner,generation);validateSessionId(interview.id);this.state.interview=interview;startedId=interview.id;
+      if(interview.mode==='audio'?!config.audioConfigured:!config.configured)throw new Error('云端尚未配置此模式的模型，请检查配置后重试');
       this.spool=await AudioSpool.open(this.root,interview.id).catch(e=>{if(e.code==='ENOENT')return AudioSpool.create(this.root,{sessionId:interview.id,title:interview.title,deviceId:owner.deviceId,cloudUrl:owner.cloudUrl,startedAt:Date.now()-Math.max(0,Date.now()-Date.parse(interview.createdAt))});throw e;});
       if(!this.spool.matchesOwner(owner))throw new Error('此本地录音属于另一个配对设备');
       this.check(owner,generation);this.token=crypto.randomUUID();await this.openSocket('live',this.spool,owner,generation);this.check(owner,generation);
@@ -56,6 +61,45 @@ class AudioController {
   }
   control(microphoneId){return {token:this.token,sessionId:this.state.interview.id,epochMs:this.spool.meta.startedAt,microphoneId:typeof microphoneId==='string'?microphoneId:'',maxSessionMinutes:this.state.config?.maxSessionMinutes||120};}
   markStarted(token){if(token!==this.token||!this.valid())throw new Error('录音启动已失效');this.state.phase='recording';this.state.recording=true;this.state.error='';this.notify(true);}
+  markFlushed(input){if(this.flushWaiter&&input?.token===this.flushWaiter.token&&input?.requestId===this.flushWaiter.requestId)this.flushWaiter.resolve();}
+  async flushCapture(){
+    const token=this.token,requestId=crypto.randomUUID();
+    await new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{if(this.flushWaiter?.requestId===requestId)this.flushWaiter=null;reject(new Error('音频尾块同步超时，请重试回答'));},1500);
+      this.flushWaiter={token,requestId,resolve:()=>{clearTimeout(timer);this.flushWaiter=null;resolve();},reject:error=>{clearTimeout(timer);this.flushWaiter=null;reject(error);}};
+      this.emit('audio.capture.flush',{token,requestId});
+    });
+  }
+  invalidateTrigger(){this.triggerRevision++;this.lastTriggerResult=null;this.lastTriggerAt=0;this.triggerPromise=null;this.state.triggerAnswerId=null;this.state.triggerStatus='';this.state.triggerError='';}
+  trigger(){
+    if(this.triggerPromise)return this.triggerPromise;
+    if(this.lastTriggerResult&&Date.now()-this.lastTriggerAt<600)return Promise.resolve(this.lastTriggerResult);
+    const operation=this.triggerCurrent();this.triggerPromise=operation;
+    void operation.finally(()=>{if(this.triggerPromise===operation)this.triggerPromise=null;}).catch(()=>{});return operation;
+  }
+  async triggerCurrent(){
+    const owner=this.owner,generation=this.generation,spool=this.spool,revision=this.triggerRevision;
+    const check=()=>{this.check(owner,generation);if(revision!==this.triggerRevision)throw new Error('面试配置或录音状态已变化，回答触发已取消，请重新触发');};
+    if(!this.state.interview||!spool||!['ready','recording','paused'].includes(this.state.phase))throw new Error('请先开始或选择本场面试录音');
+    check();this.state.triggerStatus='syncing';this.state.triggerError='';this.notify(true);
+    try{
+      const recording=this.state.phase!=='paused',connection=this.connection;
+      if(recording&&(!this.state.connected||!connection?.ready||connection.ws.readyState!==WebSocket.OPEN))throw new Error('音频连接未恢复，请等待同步完成后再回答');
+      if(recording)await this.flushCapture();check();
+      await this.waitFrames();await spool.serial;check();
+      const waiting=Array.from(spool.pending.keys()),deadline=Date.now()+5000;
+      while(waiting.some(key=>spool.pending.has(key))){
+        if(recording&&(!this.state.connected||this.connection!==connection||connection.ws.readyState!==WebSocket.OPEN))throw new Error('音频连接中断，请等待同步后再回答');
+        if(Date.now()>deadline)throw new Error('音频尚未同步完成，请等待重连或补传后再回答');
+        await new Promise(resolve=>setTimeout(resolve,20));check();
+      }
+      if(recording&&this.connection!==connection)throw new Error('音频连接已变化，请等待同步后再回答');
+      if(!['ready','recording','paused'].includes(this.state.phase))throw new Error('本场录音正在停止，回答触发已取消');
+      this.state.triggerStatus='submitting';this.notify(true);
+      const result=await this.api(owner,`/interviews/${this.state.interview.id}/trigger`,{method:'POST',body:{requestId:crypto.randomUUID()}});check();
+      const observed=this.answerStates.get(result.answer?.id);this.state.triggerStatus=observed?.status||result.answer?.status||'queued';this.state.triggerError=observed?.error||'';this.state.triggerAnswerId=result.answer?.id||null;this.lastTriggerAt=Date.now();this.lastTriggerResult=result;this.notify(true);return result;
+    }catch(error){if(this.valid(owner,generation)&&revision===this.triggerRevision){this.state.triggerStatus='failed';this.state.triggerError=error.message;this.notify(true);}throw error;}
+  }
   markStopped(token){if(this.stopWaiter&&this.stopWaiter.token===token)this.stopWaiter.resolve();}
   async stopCapture(){
     if(!this.token)return;if(this.stopWaiter?.token===this.token)return this.stopWaiter.promise;
@@ -132,6 +176,7 @@ class AudioController {
   }
   async pause(){
     if(!this.state.interview||!this.owner)return this.view();const owner=this.owner,generation=this.generation;
+    this.invalidateTrigger();
     this.state.phase='stopping';this.state.recording=false;clearTimeout(this.reconnectTimer);this.notify(true);
     await this.stopCapture();this.check(owner,generation);await this.waitFrames();await this.spool?.serial;await this.drain();this.check(owner,generation);
     const {interview}=await this.api(owner,`/interviews/${this.state.interview.id}/pause`,{method:'POST',body:{}});this.check(owner,generation);
@@ -139,6 +184,7 @@ class AudioController {
   }
   async resume(input={}){
     if(!this.state.interview||!this.owner||!this.spool)throw new Error('没有可继续的录音会话');const owner=this.owner,generation=this.generation;
+    this.invalidateTrigger();
     try{
     const {interview}=await this.api(owner,`/interviews/${this.state.interview.id}/resume`,{method:'POST',body:{}});this.check(owner,generation);this.state.interview=interview;this.token=crypto.randomUUID();this.state.phase='connecting';this.notify(true);
     await this.openSocket('live',this.spool,owner,generation);this.check(owner,generation);this.state.phase='ready';this.notify(true);void this.recover(this.spool.id).catch(()=>{});return this.control(input.microphoneId);
@@ -146,6 +192,7 @@ class AudioController {
   }
   async end(){
     if(!this.state.interview||!this.owner)return this.view();const owner=this.owner,generation=this.generation;
+    this.invalidateTrigger();
     this.state.phase='stopping';this.state.recording=false;clearTimeout(this.reconnectTimer);this.notify(true);
     await this.stopCapture();this.check(owner,generation);await this.waitFrames();await this.spool?.serial;await this.drain();this.check(owner,generation);
     const {interview}=await this.api(owner,`/interviews/${this.state.interview.id}/end`,{method:'POST',body:{}});this.check(owner,generation);
@@ -198,10 +245,12 @@ class AudioController {
     }catch(error){for(const file of files)await fs.unlink(file).catch(()=>{});throw error;}
   }
   receive(event){
-    if(event.type==='interview.updated'&&event.interview?.id===this.state.interview?.id){this.state.interview=event.interview;if(['paused','ended'].includes(event.interview.status)&&['recording','ready','connecting'].includes(this.state.phase))void this.externalStop(event.interview.status).catch(error=>{if(this.valid()){this.state.error=error.message;this.notify(true);}});}
+    if(event.type==='interview.answer'&&event.sessionId===this.state.interview?.id&&event.answer?.id){this.answerStates.set(event.answer.id,event.answer);if(this.answerStates.size>50)this.answerStates.delete(this.answerStates.keys().next().value);if(event.answer.id===this.state.triggerAnswerId){this.state.triggerStatus=event.answer.status;this.state.triggerError=event.answer.error||'';this.notify(true);}}
+    if(event.type==='interview.updated'&&event.interview?.id===this.state.interview?.id){if(['mode','provider','transcribe','audioModel','audioWindowSeconds','promptId','autoAnswer','status'].some(key=>this.state.interview[key]!==event.interview[key]))this.invalidateTrigger();this.state.interview=event.interview;if(['paused','ended'].includes(event.interview.status)&&['recording','ready','connecting'].includes(this.state.phase))void this.externalStop(event.interview.status).catch(error=>{if(this.valid()){this.state.error=error.message;this.notify(true);}});}
     if(event.type==='interview.audio.status'&&event.sessionId===this.state.interview?.id&&(event.error||event.gap)){this.state.error=String(event.error||'音频中断，转写记录中已标记缺口');this.notify(true);}
   }
   async externalStop(status){
+    this.invalidateTrigger();
     const owner=this.owner,generation=this.generation,spool=this.spool;this.state.phase='stopping';this.state.recording=false;clearTimeout(this.reconnectTimer);
     // The remote endpoint may already have stopped ASR. Preserve flushed tails for timestamped replay.
     if(this.connection){this.connection.stopping=true;this.connection.ws.close();this.connection=null;}this.state.connected=false;this.notify(true);
@@ -210,12 +259,12 @@ class AudioController {
     this.notify(true);await this.refresh();
   }
   async reset({removeLocal=false}={}){
-    const oldOwner=this.owner||this.getOwner();++this.generation;this.stopWaiter?.resolve();this.acceptingTailToken=null;this.emit('audio.capture.stop',{token:this.token});clearTimeout(this.reconnectTimer);
+    const oldOwner=this.owner||this.getOwner();++this.generation;this.flushWaiter?.reject(new Error('设备配对已变化，回答已取消'));this.invalidateTrigger();this.stopWaiter?.resolve();this.acceptingTailToken=null;this.emit('audio.capture.stop',{token:this.token});clearTimeout(this.reconnectTimer);
     if(this.connection){this.connection.stopping=true;this.connection.ws.terminate();this.connection=null;}
     for(const conn of this.replayConnections){conn.stopping=true;conn.ws.terminate();}this.replayConnections.clear();this.replaying.clear();
     await this.waitFrames();await this.spool?.serial;
     if(removeLocal&&oldOwner){for(const spool of await AudioSpool.list(this.root,oldOwner))await spool.remove();}
-    this.spool=null;this.owner=null;this.token=null;this.state={phase:'idle',connected:false,interview:null,error:'',recoveries:[],interviews:[],config:null,pending:0,bytes:0,recording:false};this.notify(true);
+    this.spool=null;this.owner=null;this.token=null;this.answerStates.clear();this.state={phase:'idle',connected:false,interview:null,error:'',recoveries:[],interviews:[],config:null,pending:0,bytes:0,recording:false};this.notify(true);
   }
   async shutdown(){await this.reset();this.closed=true;}
 }

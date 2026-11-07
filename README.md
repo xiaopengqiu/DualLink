@@ -1,8 +1,10 @@
 # 双端互联 · Dual Link
 
-下载客户端、完整源码包与编译后的网页：[v1.1.1 发布页面](https://github.com/xiaopengqiu/DualLink/releases/tag/v1.1.1)。编译产物通过 GitHub Releases 分发；Git 仓库保存源码，依赖通过 `npm ci` 安装。
+下载客户端、完整源码包与编译后的网页：[v1.2.0 发布页面](https://github.com/xiaopengqiu/DualLink/releases/tag/v1.2.0)。编译产物通过 GitHub Releases 分发；Git 仓库保存源码，依赖通过 `npm ci` 安装。
 
-自托管的 Windows → iPad 截图与实时语音问答工具。PC 快捷键截图或采集会议/麦克风声音，Linux 服务结合当前账号的 Prompt、知识库和会话历史生成回答，iPad 网页显示并保存结果。当前版本 **1.1.1**。
+自托管的 Windows → iPad 截图与实时语音问答工具。PC 快捷键截图或采集会议/麦克风声音，Linux 服务结合当前账号的 Prompt、知识库和会话历史生成回答，iPad 网页显示并保存结果。当前版本 **1.2.0**。
+
+新增：支持按账号配置音频直答／转写后回答，默认用 Ctrl+Alt+Enter 手动触发，详见 [双模式指南](docs/DUAL_MODES_GUIDE.md)。
 
 ## 包含的功能
 
@@ -68,6 +70,7 @@ npm run build
 npm run test:e2e
 npm run test:desktop
 npm run test:voice
+npm run test:modes
 npm run package:win
 npm run release:source
 ```

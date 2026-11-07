@@ -11,7 +11,7 @@ class DualLinkCaptureProcessor extends AudioWorkletProcessor {
     this.port.onmessage=event=>{
       if(event.data?.type==='flush'){
         const tail=this.resampler.flush();if(tail)this.send(tail);
-        this.port.postMessage({type:'flushed'});
+        this.port.postMessage({type:'flushed',requestId:event.data.requestId});
       }
     };
   }

@@ -54,3 +54,10 @@ test('settings constrain shortcuts and model, and crop bounds track actual scree
   assert.deepEqual(cropRect({x:10,y:20,width:100,height:50}, {width:1000,height:500},{width:2000,height:1000}),{x:20,y:40,width:200,height:100});
   assert.throws(()=>cropRect({x:-1,y:0,width:1,height:1},{width:10,height:10},{width:10,height:10}));
 });
+
+
+test('manual answer shortcut has a default and cannot conflict with either screenshot action',()=>{
+ const {validateSettings}=require('../lib/core.cjs');assert.equal(validateSettings({}).answerShortcut,'Ctrl+Alt+Enter');
+ assert.throws(()=>validateSettings({answerShortcut:'Ctrl+Alt+S'}),/快捷键/);
+ assert.throws(()=>validateSettings({fullShortcut:'Control+Alt+Enter'}),/快捷键/);
+});

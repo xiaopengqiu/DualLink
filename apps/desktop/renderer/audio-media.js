@@ -15,6 +15,16 @@
     recording.onLevel?.('remote',0);recording.onLevel?.('self',0);
     })().finally(()=>{stopping=null;});return stopping;
   }
+  async function flush(){
+    const recording=active;if(!recording)return;
+    await Promise.all(recording.nodes.map(node=>new Promise((resolve,reject)=>{
+      const requestId=crypto.randomUUID();node.flushRequests??=new Map();
+      const timer=setTimeout(()=>{node.flushRequests.delete(requestId);reject(new Error('采音尾块刷新超时，请重试'));},700);
+      node.flushRequests.set(requestId,()=>{clearTimeout(timer);node.flushRequests.delete(requestId);resolve();});
+      try{node.port.postMessage({type:'flush',requestId});}catch(error){clearTimeout(timer);node.flushRequests.delete(requestId);reject(error);}
+    })));
+    if(active!==recording||recording.stopping)throw new Error('采音已停止，回答触发已取消');
+  }
   async function microphones(requestAccess=false){
     if(!navigator.mediaDevices)throw new Error('当前客户端不能访问音频设备');
     let temporary;
@@ -48,7 +58,7 @@
         recording.nodes.push(node);
         node.onprocessorerror=()=>void fatal(new Error('音频处理器中断，请暂停后重新预检设备'));
         node.port.onmessage=event=>{
-          if(event.data?.type==='flushed'){node.flushed?.();return;}
+          if(event.data?.type==='flushed'){if(event.data.requestId)node.flushRequests?.get(event.data.requestId)?.();else node.flushed?.();return;}
           if(!current()&&!recording.stopping)return;
           if(event.data?.type==='level')onLevel?.(track,event.data.level);
           else if(event.data?.type==='pcm'&&!preflight)window.dualLink.audioFrame({token:control.token,track,startMs:event.data.startMs,samples:event.data.samples});
@@ -70,7 +80,8 @@
       return {sampleRate:context.sampleRate,tracks:['remote','self']};
     }catch(error){if(active===recording)await stop();else{stopStream(recording.remote);stopStream(recording.self);await recording.context?.close().catch(()=>{});}throw error;}
   }
-  window.DualAudioMedia={microphones,start,stop,isActive:()=>!!active,isPreflight:()=>!!active?.preflight,token:()=>active?.token};
+  window.DualAudioMedia={microphones,start,stop,flush,isActive:()=>!!active,isPreflight:()=>!!active?.preflight,token:()=>active?.token};
+  window.dualLink.onAudioFlush(({token,requestId})=>{if(active&&active.token!==token)return;void flush().then(()=>window.dualLink.audioCaptureFlushed({token,requestId})).catch(()=>{});});
   window.dualLink.onAudioStop(({token})=>{if(!token||active?.token===token||!active)void stop().finally(()=>window.dualLink.audioCaptureStopped(token)).catch(()=>{});});
   window.addEventListener('beforeunload',()=>{void stop();});
 })();

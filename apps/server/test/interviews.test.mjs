@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -68,7 +68,7 @@ test('dual-track audio uses one-use device tickets, upserts revisions and persis
 test('auto questions merge final remote sentences and context keeps actual history separate from AI suggestions', async t => {
   const s = await setup(t); const a = await s.login(), device = await s.pair(a);
   const file = new FormData(); file.append('file', new Blob(['青竹项目通过 Redis 保存会话状态。']), 'project.md'); assert.equal((await s.api('/knowledge', a, 'POST', file)).status, 201);
-  const interview = await s.create(device);
+  const interview = await s.create(device,{autoAnswer:true});
   const { socket } = await s.audio(interview, device); const remote = s.asrTasks[0], self = s.asrTasks[1];
   self.onResult({ segmentId: '1', text: '我在青竹项目实际做了断线恢复。', startMs: 0, endMs: 100, final: true });
   remote.onResult({ segmentId: '1', text: '请介绍一下 Redis', startMs: 200, endMs: 300, final: true });
@@ -85,7 +85,7 @@ test('auto questions merge final remote sentences and context keeps actual histo
 });
 
 test('pause/end drain ASR tails and replay fills old history without generating old questions', async t => {
-  const s = await setup(t); const a = await s.login(), device = await s.pair(a); const interview = await s.create(device);
+  const s = await setup(t); const a = await s.login(), device = await s.pair(a); const interview = await s.create(device,{autoAnswer:true});
   const { socket } = await s.audio(interview, device);
   s.asrTasks[0].finish = async () => s.asrTasks[0].onResult({ segmentId: 'tail', text: '请解释缓存。', startMs: 0, endMs: 100, final: true });
   const end = await s.api(`/interviews/${interview.id}/end`, a, 'POST', {}); assert.equal(end.status, 200);
@@ -117,7 +117,7 @@ test('malformed audio frame is rejected and cannot grow a recording', async t =>
 test('newer questions and final revisions cancel obsolete model work and retain versioned context', async t => {
   const calls = [];
   const runner = async input => { calls.push(input); if (calls.length === 1) await new Promise((resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once:true })); return { answer:'answer '+calls.length }; };
-  const s=await setup(t,{textRunner:runner}); const a=await s.login(),device=await s.pair(a),interview=await s.create(device);
+  const s=await setup(t,{textRunner:runner}); const a=await s.login(),device=await s.pair(a),interview=await s.create(device,{autoAnswer:true});
   s.interviews.recordSegment(interview.id,'remote','versioned',{text:'解释 Redis 是什么？',startMs:0,endMs:100,final:true},false);
   await waitFor(()=>calls.length===1);
   s.interviews.recordSegment(interview.id,'remote','versioned',{text:'解释 Redis 持久化方式是什么？',startMs:0,endMs:120,final:true},false);
@@ -141,11 +141,11 @@ test('replay can resend a persisted frame after an uncertain ACK without duplica
   assert.equal(s.db.prepare('SELECT count(*) AS n FROM interview_audio_frames').get().n,1);
 });
 
-test('zero audio retention preserves transcript but creates no audio file and quota fails explicitly', async t => {
+test('zero retention keeps temporary working PCM until end and quota fails explicitly', async t => {
   const s=await setup(t,{interviews:{rawAudioRetentionDays:0,maxDailyMinutes:1}});const a=await s.login(),device=await s.pair(a),interview=await s.create(device,{autoAnswer:false});
   const live=await s.audio(interview,device);const ack=next(live.socket,'audio.ack');live.socket.send(frame());await ack;
-  const ledger=s.db.prepare('SELECT * FROM interview_audio_frames').get();assert.equal(ledger.byte_offset,null);
-  await assert.rejects(stat(path.join(s.dataDir,'users',a.user.id,'interviews',interview.id,'remote.pcm')),{code:'ENOENT'});
+  const ledger=s.db.prepare('SELECT * FROM interview_audio_frames').get();assert.equal(ledger.byte_offset,0);
+  assert.equal((await stat(path.join(s.dataDir,'users',a.user.id,'interviews',interview.id,'remote.pcm'))).size,3200);
   s.db.prepare('UPDATE interview_audio_usage SET samples=?').run(16000*60);
   const error=next(live.socket,'audio.error');live.socket.send(frame(0,1,100));assert.match((await error).error,/今日.*音频/);
 });
@@ -209,8 +209,138 @@ test('unexpected PC disconnect drains the connected upstream tail and still reco
   assert.equal(s.asrTasks[0].finished,true);assert.ok(s.db.prepare("SELECT id FROM interview_gaps WHERE reason LIKE '%中断%'").get());
 });
 
-test('setting zero retention purges prior nonrecording PCM at startup while keeping transcript',async t=>{
+test('setting zero retention purges prior ended PCM at startup while keeping transcript',async t=>{
   const s=await setup(t),a=await s.login(),device=await s.pair(a),interview=await s.create(device,{autoAnswer:false}),live=await s.audio(interview,device);
-  const ack=next(live.socket,'audio.ack');live.socket.send(frame());await ack;s.asrTasks[0].onResult({segmentId:'private',text:'仍保留文字',startMs:0,endMs:100,final:true});await s.api(`/interviews/${interview.id}/pause`,a,'POST',{});
+  const ack=next(live.socket,'audio.ack');live.socket.send(frame());await ack;s.asrTasks[0].onResult({segmentId:'private',text:'仍保留文字',startMs:0,endMs:100,final:true});await s.api(`/interviews/${interview.id}/end`,a,'POST',{});
   const reopened=await s.restart({interviews:{rawAudioRetentionDays:0}});assert.equal(reopened.db.prepare('SELECT bytes FROM interview_audio_storage').get().bytes,0);assert.equal(reopened.db.prepare('SELECT text FROM interview_segments').get().text,'仍保留文字');assert.equal((await s.api(`/interviews/${interview.id}/audio/remote`,a)).status,404);
+});
+
+
+test('dual-mode account preferences are isolated and manual is the default',async t=>{
+ const s=await setup(t);const a=await s.login(),b=await s.login('b@example.com');
+ const changed=await s.api('/interviews/preferences',a,'PATCH',{mode:'audio',provider:'claude',transcribe:false,audioModel:'qwen3.8-omni-flash-realtime',audioWindowSeconds:45});assert.equal(changed.status,200);
+ assert.equal((await(await s.api('/interviews/preferences',a)).json()).preferences.mode,'audio');assert.equal((await(await s.api('/interviews/preferences',b)).json()).preferences.mode,'transcript');
+ const session=await s.create(a);assert.equal(session.mode,'audio');assert.equal(session.autoAnswer,false);assert.equal(session.audioWindowSeconds,45);
+});
+
+test('native audio without ASR records PCM and manually triggers an immutable answer with dedup and owner checks',async t=>{
+ const calls=[];const s=await setup(t,{asrFactory:undefined,asr:{apiKey:'',workspaceId:''},audioRunner:async input=>{calls.push(input);return {answer:'native answer'};},interviews:{rawAudioRetentionDays:0}});
+ const a=await s.login(),b=await s.login('b@example.com'),device=await s.pair(a),session=await s.create(device,{mode:'audio',transcribe:false});
+ const live=await s.audio(session,device);const ack=next(live.socket,'audio.ack');const voiced=frame();for(let i=16;i<voiced.length;i+=2)voiced.writeInt16LE(1000,i);live.socket.send(voiced);await ack;
+ assert.equal(s.db.prepare('SELECT asr_submitted FROM interview_audio_frames').get().asr_submitted,0);assert.equal(s.db.prepare('SELECT count(*) AS n FROM interview_answers').get().n,0);
+ const requestId=randomBytes(16).toString('hex');const bad=await s.api(`/interviews/${session.id}/trigger`,b,'POST',{requestId});assert.equal(bad.status,404);
+ const id='11111111-1111-4111-8111-111111111111';const r=await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:id});assert.equal(r.status,201);const body=await r.json();
+ await waitFor(()=>calls.length);assert.equal(calls[0].audioTurns.at(-1).currentQuestion,true);assert.equal(calls[0].audioTurns.at(-1).pcm.length,3200);assert.equal(body.answer.provider,'omni');assert.equal(body.answer.mode,'audio');
+ const repeated=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:id})).json();assert.equal(repeated.answer.id,body.answer.id);
+ await waitFor(()=>s.db.prepare("SELECT status FROM interview_answers").get().status==='completed');assert.doesNotMatch(calls[0].prompt,/AI_ONLY_PRIVATE_SUGGESTION/);
+ await s.api(`/interviews/${session.id}/end`,a,'POST',{});await s.interviews.cleanupAudio();assert.equal(s.db.prepare('SELECT byte_offset FROM interview_audio_frames').get().byte_offset,null);
+});
+
+test('manual transcript trigger accepts actual remote history and is not cancelled by late final revision',async t=>{
+ const s=await setup(t);const a=await s.login(),device=await s.pair(a),session=await s.create(device);
+ s.interviews.recordSegment(session.id,'self','s',{text:'本人使用SQLite',startMs:0,endMs:100,final:true},false);
+ s.interviews.recordSegment(session.id,'remote','r',{text:'为什么选择SQLite？',startMs:200,endMs:300,final:true},false);
+ const r=await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'22222222-2222-4222-8222-222222222222'});assert.equal(r.status,201);
+ const body=await r.json();await waitFor(()=>s.prompts.length);assert.match(s.prompts[0],/本人使用SQLite/);
+ s.interviews.recordSegment(session.id,'remote','r',{text:'为什么选择SQLite数据库？',startMs:200,endMs:300,final:true},false);
+ await waitFor(()=>s.db.prepare('SELECT status FROM interview_answers WHERE id=?').get(body.answer.id).status==='completed');
+ assert.equal(s.db.prepare('SELECT revision FROM interview_questions WHERE id=?').get(body.question.id).revision,1);
+});
+
+
+test('silence after a native question regenerates the same range and new voiced question cancels obsolete work',async t=>{
+ const calls=[];const s=await setup(t,{audioRunner:async input=>{calls.push(input);if(calls.length===1)await new Promise((resolve,reject)=>input.signal.addEventListener('abort',()=>reject(new Error('cancelled')),{once:true}));return {answer:'fresh native answer'};}});
+ const a=await s.login(),device=await s.pair(a),session=await s.create(device,{mode:'audio',transcribe:false});const live=await s.audio(session,device);
+ async function send(seq,time,amplitude){const f=frame(0,seq,time);for(let i=16;i<f.length;i+=2)f.writeInt16LE(amplitude,i);const ack=next(live.socket,'audio.ack');live.socket.send(f);await ack;}
+ await send(0,0,1000);const first=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'33333333-3333-4333-8333-333333333333'})).json();await waitFor(()=>calls.length===1);
+ await send(1,100,0);await new Promise(r=>setTimeout(r,620));const second=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'44444444-4444-4444-8444-444444444444'})).json();assert.equal(second.question.id,first.question.id);assert.notEqual(second.answer.id,first.answer.id);await waitFor(()=>calls.length===2);assert.equal(calls[0].signal.aborted,true);
+ await send(2,200,2000);await new Promise(r=>setTimeout(r,620));const third=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'55555555-5555-4555-8555-555555555555'})).json();assert.notEqual(third.question.id,first.question.id);assert.equal(third.question.audioRange.endMs,300);
+ assert.equal(calls[1].audioTurns.at(-1).endMs,100);
+});
+
+test('native background ASR failure is nonblocking and paused mode changes preserve explicit text questions',async t=>{
+ const audioCalls=[],s=await setup(t,{asrFactory:async()=>{throw Error('upstream unavailable');},audioRunner:async i=>{audioCalls.push(i);return {answer:'audio'};}});
+ const a=await s.login(),device=await s.pair(a),session=await s.create(device,{mode:'audio',transcribe:true,autoAnswer:true});assert.equal(session.autoAnswer,false);
+ const live=await s.audio(session,device),f=frame();for(let i=16;i<f.length;i+=2)f.writeInt16LE(1000,i);const ack=next(live.socket,'audio.ack');live.socket.send(f);await ack;
+ assert.equal(s.db.prepare('SELECT count(*) AS n FROM interview_audio_usage').get().n,0);
+ const typed=await s.api(`/interviews/${session.id}/questions`,a,'POST',{text:'手动文字问题'});assert.equal(typed.status,201);const typedBody=await typed.json();assert.equal(typedBody.answer.mode,'transcript');await waitFor(()=>s.prompts.length===1);assert.equal(audioCalls.length,0);
+ assert.equal((await s.api(`/interviews/${session.id}`,a,'PATCH',{mode:'transcript'})).status,409);await s.api(`/interviews/${session.id}/pause`,a,'POST',{});
+ const changed=await s.api(`/interviews/${session.id}`,a,'PATCH',{mode:'transcript',audioWindowSeconds:30});assert.equal(changed.status,200);assert.equal((await changed.json()).interview.mode,'transcript');
+});
+
+
+test('native context preserves actual self speech inside current remote question padding',async t=>{
+ const calls=[],s=await setup(t,{audioRunner:async i=>{calls.push(i);return {answer:'native'};}});const a=await s.login(),device=await s.pair(a),session=await s.create(device,{mode:'audio',transcribe:false}),live=await s.audio(session,device);
+ for(const [track,start,amplitude] of [[1,100,1234],[0,300,2345]]){const f=frame(track,0,start);for(let i=16;i<f.length;i+=2)f.writeInt16LE(amplitude,i);const ack=next(live.socket,'audio.ack');live.socket.send(f);await ack;}
+ await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'66666666-6666-4666-8666-666666666666'});await waitFor(()=>calls.length);
+ const self=calls[0].audioTurns.find(t=>t.track==='self');assert.ok(self,'self audio must survive remote question padding');assert.equal(self.pcm.readInt16LE(100*32),1234);
+});
+
+
+test('optional native transcription write failure and ASR quota never interrupt durable native audio',async t=>{
+ const s=await setup(t,{asrFactory:async options=>({...options,async write(){throw new Error('failed ASR write');},async finish(){},close(){}}),audioRunner:async()=>({answer:'audio'})});
+ const a=await s.login(),device=await s.pair(a),session=await s.create(device,{mode:'audio',transcribe:true}),live=await s.audio(session,device);
+ let ack=next(live.socket,'audio.ack');live.socket.send(frame());await ack;
+ s.db.prepare('INSERT INTO interview_audio_usage(user_id,day,samples) VALUES(?,?,?) ON CONFLICT(user_id,day) DO UPDATE SET samples=excluded.samples').run(a.user.id,new Date().toISOString().slice(0,10),480*60*16000);
+ ack=next(live.socket,'audio.ack');live.socket.send(frame(1,0,100));await ack;
+ assert.equal(s.db.prepare('SELECT frame_count FROM interviews WHERE id=?').get(session.id).frame_count,2);assert.equal(live.socket.readyState,WebSocket.OPEN);
+ assert.match(s.db.prepare('SELECT error FROM interviews WHERE id=?').get(session.id).error,/后台转写/);
+});
+
+
+test('manual transcript trigger waits for first new ASR after accepted voiced PCM instead of repeating old final',async t=>{
+ const s=await setup(t),a=await s.login(),device=await s.pair(a),session=await s.create(device),live=await s.audio(session,device);
+ async function voiced(seq,start){const f=frame(0,seq,start);for(let i=16;i<f.length;i+=2)f.writeInt16LE(1000,i);const ack=next(live.socket,'audio.ack');live.socket.send(f);await ack;}
+ await voiced(0,0);s.interviews.recordSegment(session.id,'remote','old',{text:'旧的问题？',startMs:0,endMs:100,final:true},false);
+ const first=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'77777777-7777-4777-8777-777777777777'})).json();await new Promise(r=>setTimeout(r,620));await voiced(1,200);
+ setTimeout(()=>s.interviews.recordSegment(session.id,'remote','new',{text:'新的问题是什么？',startMs:200,endMs:300,final:true},false),200);
+ const nextQuestion=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'88888888-8888-4888-8888-888888888888'})).json();assert.notEqual(nextQuestion.question.id,first.question.id);assert.match(nextQuestion.question.text,/新的问题/);
+});
+
+
+test('switching from native to transcript bypasses old trigger coalescing while retaining idempotent history',async t=>{
+ const s=await setup(t,{audioRunner:async()=>({answer:'native'})}),a=await s.login(),device=await s.pair(a),session=await s.create(device,{mode:'audio',transcribe:false}),live=await s.audio(session,device);
+ const f=frame();for(let i=16;i<f.length;i+=2)f.writeInt16LE(1000,i);const ack=next(live.socket,'audio.ack');live.socket.send(f);await ack;
+ const id='99999999-9999-4999-8999-999999999999',first=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:id})).json();
+ await s.api(`/interviews/${session.id}/pause`,a,'POST',{});await s.api(`/interviews/${session.id}`,a,'PATCH',{mode:'transcript'});await s.api(`/interviews/${session.id}/resume`,a,'POST',{});
+ s.interviews.recordSegment(session.id,'remote','newmode',{text:'请解释数据库',startMs:300,endMs:400,final:true},false);
+ const second=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'})).json();assert.equal(second.answer.mode,'transcript');assert.notEqual(second.answer.id,first.answer.id);
+ const old=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:id})).json();assert.equal(old.answer.id,first.answer.id);
+});
+
+
+test('explicit regeneration after partial becomes final reuses current question with final text',async t=>{
+ const s=await setup(t,{interviews:{triggerTranscriptWaitMs:30}}),a=await s.login(),device=await s.pair(a),session=await s.create(device),live=await s.audio(session,device);
+ const f=frame();for(let i=16;i<f.length;i+=2)f.writeInt16LE(1000,i);const ack=next(live.socket,'audio.ack');live.socket.send(f);await ack;
+ s.interviews.recordSegment(session.id,'remote','partial',{text:'介绍一下',startMs:0,endMs:null,final:false},false);
+ const first=await(await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'})).json();
+ s.interviews.recordSegment(session.id,'remote','partial',{text:'介绍一下你的项目',startMs:0,endMs:100,final:true},false);await new Promise(r=>setTimeout(r,620));
+ const response=await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:'cccccccc-cccc-4ccc-8ccc-cccccccccccc'});assert.equal(response.status,201);const second=await response.json();assert.equal(second.question.id,first.question.id);assert.match(second.question.text,/你的项目/);assert.doesNotMatch(second.question.text,/尚未定稿/);
+});
+
+
+for(const actor of ['device','browser'])test(`pending manual trigger revalidates ${actor} credentials after transcript wait`,async t=>{
+ const calls=[],s=await setup(t,{textRunner:async i=>{calls.push(i);return {answer:'must not run'};},interviews:{triggerTranscriptWaitMs:350}});
+ const a=await s.login(),device=await s.pair(a),session=await s.create(device);
+ s.interviews.recordSegment(session.id,'remote','waiting',{text:'请解释一下',startMs:0,endMs:null,final:false},false);
+ const pending=s.api(`/interviews/${session.id}/trigger`,actor==='device'?device:a,'POST',{requestId:actor==='device'?'dddddddd-dddd-4ddd-8ddd-dddddddddddd':'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'});
+ await new Promise(r=>setTimeout(r,80));
+ const revoked=actor==='device'?await s.api(`/devices/${device.device.id}`,a,'DELETE'):await s.api('/auth/logout',a,'POST',{});assert.equal(revoked.status,200);
+ const response=await pending;assert.ok([401,403].includes(response.status),`revoked trigger returned ${response.status}`);assert.equal(calls.length,0);assert.equal(s.db.prepare('SELECT count(*) AS n FROM interview_questions').get().n,0);
+});
+
+
+test('manual trigger pending queue is bounded per session',async t=>{
+ const s=await setup(t,{interviews:{triggerTranscriptWaitMs:350}}),a=await s.login(),session=await s.create(a);
+ s.interviews.recordSegment(session.id,'remote','wait',{text:'慢速识别提问',startMs:0,endMs:null,final:false},false);
+ const pending=Array.from({length:4},()=>s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId:randomUUID()}));
+ await new Promise(r=>setTimeout(r,60));const overflow=await s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId:'ffffffff-ffff-4fff-8fff-ffffffffffff'});assert.equal(overflow.status,429);await Promise.all(pending);
+});
+
+
+test('pending transcript trigger rejects a mode switch instead of dispatching mismatched native input',async t=>{
+ const calls=[],s=await setup(t,{audioRunner:async i=>{calls.push(i);return {answer:'wrong'};},interviews:{triggerTranscriptWaitMs:350}}),a=await s.login(),session=await s.create(a);
+ s.interviews.recordSegment(session.id,'remote','wait',{text:'正在转写问题',startMs:0,endMs:null,final:false},false);
+ const pending=s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId:randomUUID()});await new Promise(r=>setTimeout(r,60));await s.api(`/interviews/${session.id}/pause`,a,'POST',{});assert.equal((await s.api(`/interviews/${session.id}`,a,'PATCH',{mode:'audio',transcribe:false})).status,200);
+ assert.equal((await pending).status,409);assert.equal(calls.length,0);assert.equal(s.db.prepare('SELECT count(*) AS n FROM interview_questions').get().n,0);
 });

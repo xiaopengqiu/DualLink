@@ -1,14 +1,16 @@
 import { test, expect } from '@playwright/test';
 
-async function prepare(page, configured = true, initialStatus = 'recording', paginated = false) {
+async function prepare(page, configured = true, initialStatus = 'recording', paginated = false, options = {}) {
   let account = 'a';
-  let interview = { id: 'session-a', title: '后端工程师面试', status: initialStatus, provider: 'codex', promptName: '简洁回答', autoAnswer: true, deviceId: 'desktop-a', recordingStatus: 'streaming', createdAt: '2026-11-07T10:00:00Z', updatedAt: '2026-11-07T10:00:00Z', endedAt: null };
+  let interview = { id: 'session-a', title: '后端工程师面试', status: initialStatus, mode:options.mode||'transcript', transcribe:options.transcribe!==false, audioModel:'qwen3.8-omni-flash-realtime',audioWindowSeconds:120, provider: 'codex', promptName: '简洁回答', autoAnswer: true, deviceId: 'desktop-a', recordingStatus: 'streaming', createdAt: '2026-11-07T10:00:00Z', updatedAt: '2026-11-07T10:00:00Z', endedAt: null };
   const segment = { id: 'segment-a', sessionId: 'session-a', track: 'remote', segmentId: 'remote-1', text: '介绍一下 Redis 的持久化机制。', startMs: 1000, endMs: 3000, final: true, revision: 1, createdAt: interview.createdAt, updatedAt: interview.updatedAt };
   const self = { ...segment, id: 'segment-self', track: 'self', segmentId: 'self-1', text: '我在项目里使用过 AOF。', startMs: 4000, endMs: 6000 };
   const question = { id: 'question-a', sessionId: 'session-a', text: segment.text, segmentIds: [segment.id], revision: 1, status: 'answered', createdAt: interview.createdAt, updatedAt: interview.updatedAt };
   const answer = { id: 'answer-a', sessionId: 'session-a', questionId: question.id, questionRevision: 1, provider: 'codex', status: 'completed', text: '可以先说明 RDB 和 AOF 的区别。', contextSnapshotId: 'snapshot-a', sources: [{ name: '个人项目.txt', excerpt: '负责缓存持久化方案' }], contextSummary: { summary: '本次上下文包含目前可用的全部实际对话。', segmentIds: [segment.id, self.id] }, createdAt: interview.createdAt, updatedAt: interview.updatedAt };
   const seen = [];
   const pagingSeen = [];
+  const preferenceSeen = [],triggerSeen=[];
+  let preferences={mode:'transcript',provider:'bailian',transcribe:true,audioModel:'qwen3.8-omni-flash-realtime',audioWindowSeconds:120};
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url()), path = url.pathname;
     const json = (data, status = 200) => route.fulfill({ status, json: data });
@@ -22,7 +24,8 @@ async function prepare(page, configured = true, initialStatus = 'recording', pag
     if (path === '/api/captures') return json({ captures: [] });
     if (path === '/api/tasks') return json({ tasks: [] });
     if (path === '/api/knowledge') return json({ files: [] });
-    if (path === '/api/interviews/config') return json({ configured, model: 'qwen-audio-3.1-asr-flash-streaming', region: 'cn-beijing', sampleRate: 16000, maxSessionMinutes: 120, rawAudioRetentionDays: 7, autoAnswerAvailable: true, providers: ['bailian', 'codex', 'claude'], defaultProvider: 'bailian' });
+    if (path === '/api/interviews/config') return json({ configured,audioConfigured:!!options.audioConfigured,audioModels:['qwen3.8-omni-flash-realtime','omni-test'],defaults:preferences, model: 'qwen-audio-3.1-asr-flash-streaming', region: 'cn-beijing', sampleRate: 16000, maxSessionMinutes: 120, rawAudioRetentionDays: 7, autoAnswerAvailable: true, providers: ['bailian', 'codex', 'claude'], defaultProvider: 'bailian' });
+    if(path==='/api/interviews/preferences'){if(req.method()==='PATCH'){preferences={...preferences,...req.postDataJSON()};preferenceSeen.push(preferences);}return json({preferences});}
     if (path === '/api/interviews' && req.method() === 'GET') return json({ interviews: account === 'a' ? [interview] : [] });
     if (path === '/api/interviews' && req.method() === 'POST') { const body = req.postDataJSON(); seen.push(body); interview = { ...interview, ...body, id: 'session-new', status: 'recording', createdAt: new Date().toISOString() }; return json({ interview }); }
     if (path === '/api/interviews/session-new' && req.method() === 'GET') return json({ interview, segments: [], questions: [], answers: [], gaps: [] });
@@ -30,7 +33,8 @@ async function prepare(page, configured = true, initialStatus = 'recording', pag
       if (url.searchParams.has('cursor')) { pagingSeen.push(url.searchParams.get('cursor')); return json({ interview, segments: [{ ...segment, id: 'older-segment', text: '同一时间戳边界的较早原话。' }], questions: [], answers: [], gaps: [], segmentsTruncated: false, nextCursor: null }); }
       return json({ interview, segments: [segment], questions: [], answers: [], gaps: [], segmentsTruncated: true, nextCursor: '1000:2001' });
     }
-    if (path === '/api/interviews/session-a' && req.method() === 'GET') return json({ interview, segments: [segment, self], questions: [question], answers: [answer], gaps: [], contextSummary: { id: 'snapshot-other', summary: '另一次生成的上下文，不应归到本次回答。', segmentIds: [] } });
+    if (path === '/api/interviews/session-a' && req.method() === 'GET') return json({ interview, segments: options.transcribe===false?[]:[segment, self], questions: [question], answers: [answer], gaps: [], contextSummary: { id: 'snapshot-other', summary: '另一次生成的上下文，不应归到本次回答。', segmentIds: [] } });
+    if(path==='/api/interviews/session-a/trigger'){triggerSeen.push(req.postDataJSON());return json({question:{...question,id:'audio-q',text:'音频提问 00:10–00:30',audioRange:{startMs:10000,endMs:30000},audioTruncated:true},answer:{...answer,id:'audio-a',questionId:'audio-q',provider:'omni',mode:'audio',text:'原生音频回答建议。'}});}
     if (path === '/api/interviews/session-a/questions') {
       seen.push(req.postDataJSON());
       return json({ question: { ...question, id: 'manual-q', text: '请结合刚才的实际回答继续解释' }, answer: { ...answer, id: 'manual-answer', questionId: 'manual-q', status: 'running', text: '' } });
@@ -57,7 +61,7 @@ async function prepare(page, configured = true, initialStatus = 'recording', pag
   await page.getByLabel('登录密码').fill('Testing-password42!');
   await page.getByRole('button', { name: '进入工作空间' }).click();
   await expect(page.locator('.connection-pill')).toHaveText('已连接');
-  return { seen, pagingSeen };
+  return { seen, pagingSeen, preferenceSeen,triggerSeen };
 }
 
 test('interview page renders actual speech separately, revises live text and streams manual answers', async ({ page }, testInfo) => {
@@ -157,4 +161,39 @@ test('older transcript pages use the composite cursor and remain complete after 
   await page.getByRole('button', { name: '刷新面试记录', exact: true }).click();
   await expect(page.getByText('同一时间戳边界的较早原话。', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '加载更早记录', exact: true })).toHaveCount(0);
+});
+
+test('account defaults save native mode without ASR and new sessions remain explicitly triggered',async({page})=>{
+ const {preferenceSeen,seen}=await prepare(page,false,'ended',false,{audioConfigured:true});
+ await page.getByRole('button',{name:'面试会话',exact:true}).click();
+ await page.getByText('默认面试配置',{exact:true}).click();
+ await page.getByLabel('默认回答方式').selectOption('audio');
+ await page.getByLabel('默认后台转写').uncheck();
+ await page.getByLabel('默认音频模型').selectOption('omni-test');
+ await page.getByLabel('默认问题音频时长').fill('60');
+ await page.getByRole('button',{name:'保存默认配置',exact:true}).click();
+ expect(preferenceSeen[0]).toMatchObject({mode:'audio',transcribe:false,audioModel:'omni-test',audioWindowSeconds:60});
+ await page.getByRole('button',{name:'创建面试会话',exact:true}).click();
+ await expect(page.getByLabel('新会话回答方式')).toHaveValue('audio');
+ await page.getByRole('button',{name:'保存并创建',exact:true}).click();
+ expect(seen[0]).toMatchObject({mode:'audio',transcribe:false,audioModel:'omni-test',audioWindowSeconds:60,autoAnswer:false});
+});
+
+test('audio session triggers only on request and shows native answer with honest transcript and truncation states',async({page},testInfo)=>{
+ await page.setViewportSize({width:820,height:1180});
+ const {triggerSeen}=await prepare(page,false,'recording',false,{audioConfigured:true,mode:'audio',transcribe:false});
+ await page.getByRole('button',{name:'面试会话',exact:true}).click();
+ await expect(page.getByLabel('面试回答方式')).toBeDisabled();
+ await expect(page.getByText('后台转写已关闭',{exact:true})).toBeVisible();
+ expect(triggerSeen.length).toBe(0);
+ await page.getByRole('button',{name:'回答当前问题',exact:true}).click();
+ expect(triggerSeen[0].requestId).toMatch(/^[\da-f-]{36}$/);
+ await expect(page.getByRole('region',{name:'AI 回答建议'}).getByText('Qwen-Omni',{exact:true})).toBeVisible();
+ await expect(page.getByText('原生音频回答建议。',{exact:true})).toBeVisible();
+ await expect(page.getByText(/当前问题音频已按时长上限节选/)).toBeVisible();
+ await expect(page.getByRole('link',{name:'远端录音'})).toHaveAttribute('href','/api/interviews/session-a/audio/remote');
+ await expect(page.getByText('原生音频回答建议。',{exact:true})).toBeInViewport();
+ await page.screenshot({path:testInfo.outputPath('native-tablet.png'),fullPage:true});
+ await page.getByRole('button',{name:'暂停会话',exact:true}).click();
+ await expect(page.getByLabel('面试回答方式')).toBeEnabled();
 });

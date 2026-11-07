@@ -49,5 +49,11 @@ export function openDatabase(dataDir) {
   `);
   if (!db.prepare('PRAGMA table_info(interview_audio_frames)').all().some(c => c.name === 'asr_submitted')) db.exec('ALTER TABLE interview_audio_frames ADD COLUMN asr_submitted INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(interviews)').all().some(c => c.name === 'frame_count')) db.exec('ALTER TABLE interviews ADD COLUMN frame_count INTEGER NOT NULL DEFAULT 0');
+  const migrations={interviews:{config_version:'INTEGER NOT NULL DEFAULT 0',mode:"TEXT NOT NULL DEFAULT 'transcript'",transcribe:'INTEGER NOT NULL DEFAULT 1',audio_model:"TEXT NOT NULL DEFAULT 'qwen3.8-omni-flash-realtime'",audio_window_seconds:'INTEGER NOT NULL DEFAULT 120'},interview_questions:{capture_end_ms:'INTEGER',audio_start_ms:'INTEGER',audio_end_ms:'INTEGER',audio_truncated:'INTEGER NOT NULL DEFAULT 0',trigger_watermark:'INTEGER'},interview_answers:{mode:"TEXT NOT NULL DEFAULT 'transcript'",audio_model:'TEXT'}};
+  for(const [table,columns]of Object.entries(migrations)){const existing=new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(c=>c.name));for(const [name,type]of Object.entries(columns))if(!existing.has(name))db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);}
+  db.exec(`CREATE TABLE IF NOT EXISTS interview_preferences(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS interview_triggers(session_id TEXT NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,request_id TEXT NOT NULL,question_id TEXT NOT NULL REFERENCES interview_questions(id) ON DELETE CASCADE,answer_id TEXT NOT NULL REFERENCES interview_answers(id) ON DELETE CASCADE,created_at TEXT NOT NULL,PRIMARY KEY(session_id,request_id));`);
+  if (!db.prepare('PRAGMA table_info(interview_audio_frames)').all().some(c=>c.name==='active'))db.exec('ALTER TABLE interview_audio_frames ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+  if(!db.prepare('PRAGMA table_info(interview_triggers)').all().some(c=>c.name==='config_version'))db.exec('ALTER TABLE interview_triggers ADD COLUMN config_version INTEGER NOT NULL DEFAULT 0');
   return db;
 }

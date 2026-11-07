@@ -77,10 +77,10 @@ export async function createApp(options = {}) {
   let runner = options.runner;
   if (!runner) { const { createCliRunner } = await import('./providers.mjs'); runner = createCliRunner(options.cli || {}); }
   const worker = createWorker({ db, dataDir, runner, publish: realtime.publish, taskView, concurrency: options.concurrency || Number(process.env.WORKER_CONCURRENCY) || 1, timeoutMs: options.timeoutMs || Number(process.env.AI_TIMEOUT_MS) || 180000, autoStart: options.startWorker !== false });
-  const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews });
+  const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, audioRunner: options.audioRunner, omni: options.omni, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews });
   protectedRouter.use('/interviews', interviews.router);
 
-  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.1.1' }));
+  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.2.0' }));
   const loginLimit = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: '登录尝试过多，请 15 分钟后重试' } });
   app.post('/api/auth/login', loginLimit, asyncRoute(async (req, res) => {
     const email = typeof req.body.email === 'string' ? req.body.email.toLowerCase().trim() : '';

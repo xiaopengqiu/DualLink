@@ -7,7 +7,7 @@
 ```bash
 cd /opt/dual-link-src/DualLink
 sudo git fetch origin --tags
-sudo git checkout v1.1.1
+sudo git checkout v1.2.0
 sudo bash deploy/install.sh http://203.0.113.8:3000 native
 ```
 
@@ -43,7 +43,7 @@ sudo systemctl status dual-link --no-pager
 curl -fsS http://127.0.0.1:3000/api/health
 ```
 
-然后 iPad 浏览器和 1.1.1 PC 客户端均填写 `http://203.0.113.8:3000`，登录、配对并测试截图及语音。HTTP 自动使用 `ws://` 进行实时同步和语音上传。语音从 PC 本地采集，不需要网页申请麦克风权限。部分浏览器在公网 HTTP 下限制 WebRTC 或剪贴板，截图会走云端上传，回答可以手动选择复制。
+然后 iPad 浏览器和 1.2.0 PC 客户端均填写 `http://203.0.113.8:3000`，登录、配对并测试截图及语音。HTTP 自动使用 `ws://` 进行实时同步和语音上传。语音从 PC 本地采集，不需要网页申请麦克风权限。部分浏览器在公网 HTTP 下限制 WebRTC 或剪贴板，截图会走云端上传，回答可以手动选择复制。
 
 排查连接：
 

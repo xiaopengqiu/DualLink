@@ -81,12 +81,20 @@ INTERVIEW_AI_TIMEOUT_MS=90000
 INTERVIEW_CONTEXT_CHARS=40000
 INTERVIEW_AUTO_DEBOUNCE_MS=800
 INTERVIEW_DEFAULT_PROVIDER=codex
+INTERVIEW_DEFAULT_MODE=transcript
+INTERVIEW_AUDIO_WINDOW_SECONDS=120
 INTERVIEW_CODEX_TRANSPORT=app-server
 INTERVIEW_REASONING_EFFORT=low
 INTERVIEW_TEXT_MODEL=qwen-flash
 INTERVIEW_MAX_OUTPUT_TOKENS=1800
 # INTERVIEW_TEXT_API_KEY=
 # INTERVIEW_TEXT_BASE_URL=https://YOUR_WORKSPACE.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+OMNI_MODEL=qwen3.8-omni-flash-realtime
+# Optional independent native audio credentials; default uses DASHSCOPE variables.
+# OMNI_API_KEY=
+# OMNI_WORKSPACE_ID=
+# OMNI_REGION=cn-beijing
+# OMNI_MODELS=qwen3.8-omni-flash-realtime,qwen3.5-omni-flash-realtime
 EOF
   chmod 640 /etc/dual-link.env
   chown root:duallink /etc/dual-link.env
