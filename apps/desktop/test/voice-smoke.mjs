@@ -27,4 +27,3 @@ try{
   await fs.mkdir(path.join(root,'.local'),{recursive:true});await page.screenshot({path:path.join(root,'.local','desktop-voice.png'),fullPage:true});
   console.log('Voice Electron smoke passed: actual AudioWorklet, dual synthetic sources, zero-output capture graph, local UI, strict preload.');
 }finally{await application.close();await fs.rm(dataDir,{recursive:true,force:true});}
-
