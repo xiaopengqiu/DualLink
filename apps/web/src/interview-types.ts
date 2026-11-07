@@ -1,0 +1,13 @@
+import type { Provider } from './types';
+export type InterviewProvider = Provider | 'bailian';
+
+export interface InterviewConfig { configured: boolean; model: string; region: string; sampleRate: number; maxSessionMinutes: number; rawAudioRetentionDays: number; autoAnswerAvailable: boolean; providers?: InterviewProvider[]; defaultProvider?: InterviewProvider; }
+export interface Interview { id: string; title: string; status: 'recording' | 'paused' | 'ended'; provider: InterviewProvider; promptId?: string; promptName: string; autoAnswer: boolean; deviceId: string | null; createdAt: string; endedAt: string | null; updatedAt: string; recordingStatus?: string; summary?: string; error?: string | null; }
+export interface InterviewSegment { id: string; sessionId: string; track: 'remote' | 'self'; segmentId: string; text: string; startMs: number; endMs: number | null; final: boolean; revision: number; createdAt: string; updatedAt: string; replay?: boolean; }
+export interface InterviewQuestion { id: string; sessionId: string; text: string; segmentIds: string[]; revision: number; status: 'pending' | 'answering' | 'answered' | 'cancelled' | 'failed'; createdAt: string; updatedAt: string; }
+export interface InterviewAnswer { id: string; sessionId: string; questionId: string; questionRevision: number; provider: InterviewProvider; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; text: string; error?: string | null; contextSnapshotId?: string | null; contextSummary?: InterviewContextSummary | null; createdAt: string; updatedAt: string; usage?: Record<string, unknown>; sources?: {name: string; excerpt: string}[]; }
+export interface InterviewGap { id: string; track?: 'remote' | 'self' | null; startMs?: number | null; endMs?: number | null; reason?: string; message?: string; createdAt?: string; }
+export interface InterviewContextSummary { id?: string; summary: string; segmentIds: string[]; }
+export interface InterviewDetail { interview: Interview; segments: InterviewSegment[]; questions: InterviewQuestion[]; answers: InterviewAnswer[]; gaps: InterviewGap[]; contextSummary?: InterviewContextSummary | null; segmentsTruncated?: boolean; nextCursor?: string | number | null; }
+export interface InterviewState extends Omit<InterviewDetail, 'interview'> { sessionId: string; interview: Interview | null; earlierPagesLoaded: boolean; audioStatus: Record<string, {status: string; error?: string | null}>; }
+export interface InterviewEvent { type: string; sessionId?: string; interview?: Interview; segment?: InterviewSegment; question?: InterviewQuestion; answer?: InterviewAnswer; answerId?: string; delta?: string; track?: string; status?: string; error?: string; gap?: InterviewGap; }

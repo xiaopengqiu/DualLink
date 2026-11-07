@@ -1,0 +1,5 @@
+# Replace assistant.example.com with your real DNS name.
+assistant.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000
+}

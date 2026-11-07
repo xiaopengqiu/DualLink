@@ -1,0 +1,28 @@
+[Unit]
+Description=Dual Link screenshot assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=duallink
+Group=duallink
+WorkingDirectory=/opt/dual-link
+EnvironmentFile=/etc/dual-link.env
+Environment=HOME=/var/lib/dual-link
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node /opt/dual-link/apps/server/src/index.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dual-link
+# Docker CLI must be installed and duallink in docker group for CLI_MODE=docker.
+# The web app never mounts the Docker socket into the AI job.
+
+[Install]
+WantedBy=multi-user.target

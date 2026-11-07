@@ -1,0 +1,84 @@
+# 实时语音与面试记录
+
+Windows 客户端采集会议声音和本人麦克风，Linux 服务分别连接两路百炼流式语音识别，再把转写和回答同步给当前账号已连接的网页。戴耳机也可以采集会议声音；音频上传直接走云端，不依赖 iPad 网页保持前台或两台设备处于同一 Wi-Fi。
+
+## 在服务器启用
+
+截图模型与语音识别是两个独立配置。已有 Codex / Claude 登录不能替代语音识别凭据。需要在阿里云百炼开通所用语音模型，并从同一地域、业务空间取得 API Key 和业务空间 ID。
+
+编辑 `/etc/dual-link.env`（本地开发则是项目根目录 `.env`）：
+
+```ini
+DASHSCOPE_API_KEY=填入服务端密钥
+DASHSCOPE_WORKSPACE_ID=填入业务空间ID
+ASR_REGION=cn-beijing
+ASR_MODEL=qwen-audio-3.1-asr-flash-streaming
+ASR_MAX_SESSION_MINUTES=120
+ASR_DAILY_MINUTES=480
+AUDIO_RETENTION_DAYS=7
+AUDIO_MAX_USER_BYTES=536870912
+INTERVIEW_DEFAULT_PROVIDER=codex
+INTERVIEW_CODEX_TRANSPORT=app-server
+INTERVIEW_REASONING_EFFORT=low
+INTERVIEW_AI_TIMEOUT_MS=90000
+INTERVIEW_CONTEXT_CHARS=40000
+INTERVIEW_AUTO_DEBOUNCE_MS=800
+```
+
+```bash
+sudo systemctl restart dual-link
+sudo journalctl -u dual-link -n 100 --no-pager
+```
+
+Key 只放在服务器，不填写到 PC 或 iPad。`ASR_DAILY_MINUTES` 是每账号每天两轨合计的音频分钟数，默认 480 分钟约等于 4 小时双轨采集，按 UTC 日累计；不等同于供应商账单。新安装脚本会生成上述配置模板；升级时脚本保留旧环境文件，需要手工添加新项。使用 Nginx 时，除了原有 `/ws`，还要确保 `/audio` 的 WebSocket Upgrade 和合理的长连接超时；Caddy 的现有 `reverse_proxy` 配置同时支持两者。
+
+本实现使用业务空间格式的流式地址，默认 `wss://业务空间ID.地域.maas.aliyuncs.com/api-ws/v1/inference`。请按你的实际地域和模型权限配置，勿将北京密钥与其他地域地址混用。参考[百炼 API Key 与业务空间](https://help.aliyun.com/zh/model-studio/get-api-key)、[实时识别指南](https://help.aliyun.com/zh/model-studio/real-time-speech-recognition-user-guide)、[流式客户端事件](https://help.aliyun.com/zh/model-studio/qwen-audio-asr-streaming-client-events)。
+
+## 选择回答模型
+
+- **Codex**：复用服务器已有 CLI 认证。`app-server` 模式预热当前面试的进程；每个问题仍使用独立模型线程，服务端显式组装上下文。已完成的线程解除订阅，面试结束清理进程。可设 `INTERVIEW_CODEX_TRANSPORT=exec` 回退到逐次命令行调用。协议参见 [Codex App Server](https://learn.chatgpt.com/docs/app-server)。
+- **Claude**：使用服务器已有 Claude Code 的纯文本调用；沿用截图服务的 CLI 路径与认证配置。
+- **百炼文本模型**：面试页可单独选择，用流式 HTTP 接口回答，不经过 CLI 启动。默认复用 `DASHSCOPE_API_KEY`、业务空间和地域；可用下列变量覆盖。此选项只用于语音/手动文本问答，截图仍使用 Codex / Claude。
+
+```ini
+# 可选：单独的文本服务密钥、地址
+# INTERVIEW_TEXT_API_KEY=...
+# INTERVIEW_TEXT_BASE_URL=https://业务空间ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+INTERVIEW_TEXT_MODEL=qwen-flash
+INTERVIEW_MAX_OUTPUT_TOKENS=1800
+```
+
+“已安装 CLI”仍需验证专用服务账号已认证，具体见[部署指南](DEPLOYMENT.md)。热进程降低启动成本，无法保证模型网络与推理时间。模型名称须在你的空间可用，可改为已开通且支持流式输出的兼容模型。
+
+## 开始一场记录
+
+1. 更新服务器和 Windows 客户端到 1.1.0，完成原有设备配对。
+2. 在 PC 打开「面试录音」，选择与会议软件相同的麦克风，检查设备与音量。系统音频采集当前 Windows 输出设备；耳机应是会议的实际播放设备。
+3. 填写名称、回答模型，开始录音；也可以连接网页已创建的进行中会话。客户端明确显示录音状态和两路音量。
+4. iPad 网站打开「面试会话」，选择当前记录。远端与本人分别显示；未定稿文字会更新，定稿后才参加自动提问判断。
+5. 可以关闭自动回答，选择几段远端定稿发言手动生成，或输入校正后的问题。生成中的建议可取消，也可以重新生成。
+6. 暂停后可继续；结束时先停止采音并尽量收齐尾句。历史记录和 JSON / Markdown 导出仍可查看。
+
+系统录音使用 Windows 回环采集，不需要把会议声音外放，不会主动静音会议；采集图输出静音，避免重复播放和反馈。当前版本采集系统混音，其他应用的音乐或提示音也可能进入远端轨。它不会自动区分多个远端说话人。启用蓝牙耳机麦克风可能使 Windows 切换音频模式，这是设备/系统行为，需在实际设备预检。
+
+## 回答如何利用历史
+
+数据库保存整场双方转写、提问、回答和回答时的上下文快照。每次调用包含账号风格快照、相关知识片段、近期原文以及更早记录中选出的相关摘录。上下文有长度预算；保存完整记录与每次把全部记录塞给模型是两回事。
+
+本人实际发言与 AI 建议分开存储。未说出口的建议不会被当作本人履历或已经回答的事实。默认风格在会话创建时保存快照，后来编辑账号 Prompt 不会悄悄改变这场会话。技术名词可在网页创建会话时设置识别热词；建议把项目名称、常见缩写和技术栈列入其中。
+
+## 断网、保留与恢复
+
+客户端先把帧写入本地日志，再发送到云端。收到云端确认后标记已接收；掉线时显示缓存和重连状态。实时流优先，旧音频走独立补传连接；补传只补历史，不触发过时问题的自动回答。存在中断时网页显示缺口，不能把“已恢复连接”当成所有内容一定完整。
+
+本地未完成录音按原配对设备隔离，可在客户端恢复、导出或删除；切换账号不会把旧缓存传给新账号。本地缓存有容量上限，磁盘/队列满会明确报错。请在退出客户端或关机前结束会话并确认缓存情况。
+
+服务器原始音频默认在会话结束或暂停后保留 7 天，启动时及每分钟清理过期内容；恢复后的新增发言会更新该时间。`AUDIO_RETENTION_DAYS=0` 不保存新原始音频，启动时也会清理旧的非录制中音频。转写和问答保存至删除会话。
+
+原始音频每账号默认限额 512 MiB，连续双轨 PCM 两小时约占 440 MiB；多场记录会累计占用。可将 `AUDIO_MAX_USER_BYTES` 调高至最大 2147483648（2 GiB），或设 `AUDIO_RETENTION_DAYS=0` 仅长期保存文字。额度不足会明确停止上传并提示，待传内容仍在本机可恢复/导出。历史导出包含完整转写，网页长会话按批加载。删除会话会清理服务端相关数据；已经下载的导出文件、备份和本地缓存由你自行管理。
+
+## 上线验收
+
+先用一场测试会议验收：远端说一句、本人说一句，确认轨道正确；检查耳机播放和会议麦克风正常；连续提问验证上一轮本人实际发言进入下一轮回答；断网重连检查补传；结束并导出检查尾句和全场记录；另一个账号验证不可见。
+
+端到端延迟包括语音定稿、合并提问等待、网络、模型首字。需要在你的 ECS、密钥、会议设备上测量；本机 Codex 真实文字试跑首问首字约 7–9 秒，同进程下一问的一次样本约 3.7 秒，不能据此承诺固定时延。百炼直连文本选项提供了减少 CLI 开销的路径，但本交付环境没有可用百炼密钥，尚未测量真实识别准确率、语音延迟或其文本模型延迟。未配置识别服务时客户端会明确阻止录音，不会生成假转写。

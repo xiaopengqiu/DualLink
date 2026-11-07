@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'"><title>双端互联</title><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="voice.css"></head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><img src="../assets/icon.png" alt=""><div><strong>双端互联</strong><small>DUAL LINK</small></div></div>
+    <div class="sidebar-label">我的工作空间</div>
+    <button class="nav active" data-tab="workspace"><span>◈</span> 连接与截图</button>
+    <button class="nav" data-tab="voice"><span>◉</span> 面试录音</button>
+    <button class="nav" data-tab="preferences"><span>⚙</span> 偏好设置</button>
+    <div class="sidebar-tip"><span class="tip-icon">⌘</span><p>按下快捷键<br>灵感，即刻送达</p><small>截图会发送到你自己的云服务</small></div>
+    <div class="sidebar-bottom"><span class="dot" id="side-dot"></span><div><strong id="side-status">尚未连接</strong><small id="side-user">配对你的第一台设备</small></div></div>
+    <div class="version">WINDOWS CLIENT · V1.1.0</div>
+  </aside>
+  <main>
+    <header><div class="breadcrumb">我的工作空间 <span>/</span> <b id="breadcrumb-page">连接与截图</b></div><button id="open-web" class="button subtle" title="在浏览器打开云端网站" disabled>↗ 打开网页</button></header>
+    <div class="content">
+      <div class="page-title"><div><div class="eyebrow">SCREENSHOT, CONNECTED</div><h1 id="page-title">连接你的下一块屏幕</h1><p id="page-description">从电脑捕获内容，在 iPad 上接续思考。</p></div><span id="connection-badge" class="badge muted">未配对</span></div>
+      <div id="error" class="notice error" role="alert" hidden></div>
+      <div id="security-notice" class="notice" hidden>系统加密存储不可用，设备凭据仅在本次运行中保留，退出后需重新配对。</div>
+
+      <section id="workspace-tab">
+        <section class="card setup-card" id="setup-card">
+          <div class="card-title"><span class="step">01</span><div><h2>连接云服务</h2><p>使用 iPad 网页中的设备配对功能绑定电脑</p></div></div>
+          <form id="pair-form"><div class="field"><label for="cloud-url">云服务地址</label><input id="cloud-url" type="url" placeholder="https://assist.example.com" autocomplete="url" required><small>使用 HTTPS 域名，本地调试可使用 http://localhost:3000</small></div><div class="pair-row"><div class="field"><label for="device-name">电脑名称</label><input id="device-name" maxlength="80" placeholder="我的 Windows 电脑" required></div><button class="button primary" id="pair-button" type="submit">生成配对码 <span>→</span></button></div></form>
+          <div class="pair-code-area" id="pair-code-area" hidden><img id="pair-qr" alt="用 iPad 扫描配对二维码"><div><span class="tiny-label">在网页输入配对码</span><strong id="pair-code"></strong><p>同一账号打开网页 → 设备 → 输入此代码</p><small id="pair-expiry"></small><span class="waiting"><i></i> 正在等待 iPad 确认…</span></div></div>
+        </section>
+        <section class="connected-card card" id="connected-card" hidden><div class="computer-icon">▣</div><div class="connected-info"><h2 id="connected-name">我的电脑</h2><p id="connected-origin"></p><span id="connected-account"></span></div><button class="button subtle" id="reconnect">重新连接</button><button class="icon-button" id="unpair" title="解除配对" aria-label="解除配对">×</button></section>
+        <div class="two-columns">
+          <section class="card capture-card"><div class="card-title"><span class="step">02</span><div><h2>捕获此刻的内容</h2><p>选择截图方式，问题会发送到你的工作台</p></div></div><div class="capture-actions"><button id="capture-full" class="capture-action" disabled><span class="capture-symbol">▣</span><strong>全屏截图</strong><kbd id="full-key">Ctrl + Alt + S</kbd></button><button id="capture-region" class="capture-action" disabled><span class="capture-symbol crop-symbol">⌗</span><strong>框选截图</strong><kbd id="region-key">Ctrl + Alt + R</kbd></button></div><div class="capture-footer"><span class="dot" id="lan-dot"></span><span id="lan-status">iPad 连接后可启用同网直传</span></div></section>
+          <section class="card delivery-card"><div class="card-title compact"><div><h2>传输概览</h2><p>可靠送达，随时接续</p></div><span class="status-icon">↗</span></div><div class="delivery-stats"><div><strong id="pending-count">0</strong><span>等待上传</span></div><div><strong id="peer-count">0</strong><span>直连网页</span></div></div><button class="button full-width subtle" id="retry" disabled>↻ 立即重试待传截图</button><p class="microcopy">网络断开时保存在本机，恢复后自动上传</p></section>
+        </div>
+        <section class="card history-card"><div class="card-title compact"><div><h2>最近截图</h2><p>查看本次运行中的捕获与传输状态</p></div><button class="button text-button" id="preview-last" disabled>查看最新截图 →</button></div><div id="recent-list" class="recent-list"><div class="empty-state"><span>▧</span><p>还没有截图</p><small>完成配对后，按快捷键开始第一次捕获</small></div></div></section>
+      </section>
+
+      <section id="voice-tab" hidden>
+        <section class="card voice-intro"><div><span class="eyebrow">LISTEN. REMEMBER. RESPOND.</span><h2>把整场对话，留在你的工作空间</h2><p>会议播放声与本人麦克风独立采集，正常播放继续。建议戴耳机，并选择会议正在使用的麦克风。</p></div><span id="voice-status" class="badge muted" role="status">尚未开始</span></section>
+        <div id="voice-error" class="notice error" role="alert" hidden></div>
+        <div id="voice-config-note" class="notice" hidden>服务端尚未配置百炼实时语音识别。请在云端配置密钥、业务空间和地域后刷新。</div>
+        <section class="card voice-settings"><div class="card-title"><span class="step">01</span><div><h2>准备本场面试</h2><p>录音仅传到已配对的服务，iPad 等设备可同步查看字幕与回答。</p></div><button class="button subtle" id="voice-refresh" type="button">刷新会话</button></div>
+          <div class="field"><label for="voice-existing">面试会话</label><select id="voice-existing"><option value="">新建一场面试</option></select><small>可继续由网页创建或之前中断的会话；完整问答历史由服务器保存。</small></div>
+          <div class="pair-row equal"><div class="field"><label for="voice-title">本场面试标题</label><input id="voice-title" maxlength="120" placeholder="例如：后端开发技术面试"></div><div class="field"><label for="voice-provider">面试回答模型</label><select id="voice-provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="bailian">百炼文本 API</option></select></div></div>
+          <div class="field"><label for="voice-prompt">本场回答风格</label><select id="voice-prompt"><option value="">账号默认风格</option></select></div>
+          <div class="pair-row"><div class="field"><label for="voice-microphone">麦克风（与会议使用的设备一致）</label><select id="voice-microphone"><option value="">系统默认麦克风</option></select></div><button id="voice-devices" class="button subtle" type="button">刷新音频设备</button></div>
+          <label class="toggle-row"><span><strong>识别问题后自动生成建议</strong><small>关闭后仍保存双方转写，在网页中选择问题手动生成回答。</small></span><input type="checkbox" id="voice-auto-answer" role="switch" checked></label>
+          <div class="voice-note">系统采音包含默认播放设备的混音，可能含其它程序提示声；不会自动限定为某个面试官。蓝牙耳机请先完成声音预检。</div>
+        </section>
+        <section class="card"><div class="card-title"><span class="step">02</span><div><h2>声音预检与录音</h2><p>两路同时正常后开始。检测音频不会回放到耳机，预检不上传音频。</p></div><span id="voice-recording-indicator" class="recording-indicator" hidden><i></i>正在采音</span></div>
+          <div class="audio-meters"><div><span><b>会议播放声</b><small id="voice-remote-percent">0%</small></span><meter id="voice-level-remote" min="0" max="1" value="0" aria-label="会议播放声电平"></meter><p>请让会议或系统播放一段声音，观察电平。</p></div><div><span><b>本人麦克风</b><small id="voice-self-percent">0%</small></span><meter id="voice-level-self" min="0" max="1" value="0" aria-label="本人麦克风电平"></meter><p>说一句话，确认所选麦克风有输入。</p></div></div>
+          <div class="voice-preflight-actions"><button id="voice-preflight" class="button subtle" type="button">开始声音预检</button><button id="voice-preflight-stop" class="button subtle" type="button" hidden>停止预检</button><small id="voice-preflight-result">预检会在 15 秒后自动停止。</small></div>
+          <div class="voice-recording-controls"><button id="voice-start" class="button primary" type="button">开始面试录音</button><button id="voice-pause" class="button subtle" type="button" hidden>暂停录音</button><button id="voice-resume" class="button primary" type="button" hidden>继续录音</button><button id="voice-end" class="button voice-end" type="button" hidden>结束并保存</button></div>
+          <div class="voice-stats"><div><strong id="voice-time">00:00</strong><span>会话时长</span></div><div><strong id="voice-backlog">0</strong><span>待传音频分块</span></div><div><strong id="voice-cache">0 MB</strong><span>本机保护缓存</span></div></div>
+          <div id="voice-network-note" class="voice-network-note">尚未建立音频连接</div>
+        </section>
+        <section class="card"><div class="card-title compact"><div><h2>最近识别</h2><p>完整双方转写及 AI 建议可在 iPad 网站的「面试会话」查看。</p></div></div><div class="voice-caption"><span>远端</span><p id="voice-caption-remote">等待面试官发言…</p></div><div class="voice-caption self"><span>本人</span><p id="voice-caption-self">等待本人发言…</p></div></section>
+        <section class="card"><div class="card-title compact"><div><h2>本机待恢复录音</h2><p>网络恢复后可后台补传。历史音频仅补齐记录，不自动生成过时回答。</p></div></div><div id="voice-recovery-list" class="voice-recovery-list"><div class="empty-state"><p>没有待恢复录音</p></div></div></section>
+      </section>
+      <section id="preferences-tab" hidden>
+        <form id="settings-form">
+          <section class="card"><div class="card-title"><span class="step">◈</span><div><h2>捕获与回答</h2><p>让截图符合你的使用习惯</p></div></div><div class="field"><label for="display">截图显示器</label><select id="display"><option value="">跟随鼠标所在显示器</option></select></div><div class="pair-row equal"><div class="field"><label for="full-shortcut">全屏快捷键</label><input id="full-shortcut" placeholder="Ctrl+Alt+S" maxlength="80"></div><div class="field"><label for="region-shortcut">框选快捷键</label><input id="region-shortcut" placeholder="Ctrl+Alt+R" maxlength="80"></div></div><div id="shortcut-warning" class="notice" hidden></div><div class="field"><label for="provider">默认模型服务</label><select id="provider"><option value="codex">Codex CLI</option><option value="claude">Claude Code</option></select><small>回答风格和知识库在 iPad 网页中按账号管理</small></div><label class="toggle-row"><span><strong>截图后自动分析</strong><small>关闭后，只上传截图，在网页确认后再分析</small></span><input type="checkbox" id="analyze" role="switch"></label><label class="toggle-row"><span><strong>优先同网直传</strong><small>先尝试传给 iPad，2 秒未确认时回退云端上传</small></span><input type="checkbox" id="lan-first" role="switch"></label><label class="toggle-row"><span><strong>开机自动启动</strong><small>登录 Windows 后启动客户端并在托盘待命</small></span><input type="checkbox" id="auto-start" role="switch"></label></section><div class="settings-footer"><span id="save-feedback" role="status"></span><button class="button primary" type="submit">保存偏好设置</button></div>
+        </form>
+      </section>
+      <footer>你的服务，你的内容。截图仅发送到已配对的云端。</footer>
+    </div>
+  </main>
+  <dialog id="preview-dialog"><div class="dialog-top"><strong>最新截图</strong><button id="close-preview" class="icon-button" aria-label="关闭预览">×</button></div><img id="preview-image" alt="最新截图预览"></dialog>
+  <script src="transfer.js"></script><script src="app.js"></script><script src="audio-media.js"></script><script src="voice-ui.js"></script>
+</body></html>

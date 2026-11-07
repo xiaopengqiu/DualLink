@@ -1,0 +1,40 @@
+const {contextBridge,ipcRenderer}=require('electron');
+const subscribe=(channel,callback)=>{if(typeof callback!=='function')throw new Error('回调无效');const listener=(_event,data)=>callback(data);ipcRenderer.on(channel,listener);return ()=>ipcRenderer.removeListener(channel,listener);};
+const bridge={
+  getState:()=>ipcRenderer.invoke('get-state'),
+  saveSettings:settings=>ipcRenderer.invoke('save-settings',settings),
+  startPairing:settings=>ipcRenderer.invoke('start-pairing',settings),
+  unpair:()=>ipcRenderer.invoke('unpair'),
+  capture:mode=>ipcRenderer.invoke('capture',mode),
+  retryUploads:()=>ipcRenderer.invoke('retry-uploads'),
+  lastImage:()=>ipcRenderer.invoke('last-image'),
+  openWebsite:()=>ipcRenderer.invoke('open-website'),
+  reconnect:()=>ipcRenderer.invoke('reconnect'),
+  audioStatus:()=>ipcRenderer.invoke('audio-status'),
+  audioRefresh:()=>ipcRenderer.invoke('audio-refresh'),
+  audioPrepare:()=>ipcRenderer.invoke('audio-prepare'),
+  audioStart:options=>ipcRenderer.invoke('audio-start',options),
+  audioCaptureStarted:token=>ipcRenderer.invoke('audio-capture-started',token),
+  audioCaptureStopped:token=>ipcRenderer.invoke('audio-capture-stopped',token),
+  audioCaptureFailed:input=>ipcRenderer.invoke('audio-capture-failed',input),
+  audioPause:()=>ipcRenderer.invoke('audio-pause'),
+  audioResume:options=>ipcRenderer.invoke('audio-resume',options),
+  audioEnd:()=>ipcRenderer.invoke('audio-end'),
+  audioRecover:id=>ipcRenderer.invoke('audio-recover',id),
+  audioDiscard:id=>ipcRenderer.invoke('audio-discard',id),
+  audioExportLocal:id=>ipcRenderer.invoke('audio-export-local',id),
+  audioFrame:frame=>ipcRenderer.send('audio-frame',frame),
+  signal:(targetPeerId,payload)=>ipcRenderer.send('signal',{targetPeerId,payload}),
+  acknowledge:captureId=>ipcRenderer.send('direct-ack',captureId),
+  peerCount:count=>ipcRenderer.send('peer-count',count),
+  overlayResult:rect=>ipcRenderer.send('overlay-result',rect),
+  onState:callback=>subscribe('state',callback),
+  onNetwork:callback=>subscribe('network-event',callback),
+  onReset:callback=>subscribe('network-reset',callback),
+  onRtcConfig:callback=>subscribe('rtc-config',callback),
+  onCapture:callback=>subscribe('capture-direct',callback),
+  onOverlay:callback=>subscribe('overlay-image',callback),
+  onAudioStop:callback=>subscribe('audio.capture.stop',callback)
+};
+if(process.env?.DUALLINK_TEST_MODE==='1')bridge.audioTestFrame=input=>ipcRenderer.invoke('audio-test-frame',input);
+contextBridge.exposeInMainWorld('dualLink',bridge);

@@ -1,0 +1,35 @@
+{
+  "name": "dual-link",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Self-hosted PC to iPad screenshot assistant",
+  "workspaces": [
+    "apps/server",
+    "apps/web",
+    "apps/desktop"
+  ],
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace @dual-link/server",
+    "dev:web": "npm run dev --workspace @dual-link/web",
+    "desktop": "npm run start --workspace @dual-link/desktop",
+    "build": "npm run build --workspace @dual-link/web",
+    "test": "node --test --test-concurrency=1 apps/server/test/*.test.mjs apps/desktop/test/*.test.cjs apps/web/test/*.test.mjs",
+    "test:e2e": "playwright test",
+    "test:desktop": "node tests/desktop-e2e.mjs",
+    "test:voice": "node tests/voice-e2e.mjs",
+    "start": "npm run start --workspace @dual-link/server",
+    "admin": "node --env-file-if-exists=.env apps/server/src/admin.mjs",
+    "package:win": "npm run package:win --workspace @dual-link/desktop",
+    "release:source": "node scripts/release-source.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "fflate": "^0.8.3"
+  },
+  "overrides": {
+    "minimatch@>=7.0.0 <11.0.1": "11.0.1"
+  }
+}

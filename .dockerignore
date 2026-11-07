@@ -1,0 +1,12 @@
+.git
+node_modules
+**/node_modules
+release
+data
+.env
+.env.*
+!.env.example
+test-results
+playwright-report
+.local
+**/dist
