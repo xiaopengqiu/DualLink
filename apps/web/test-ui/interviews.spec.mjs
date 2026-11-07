@@ -169,7 +169,7 @@ test('account defaults save native mode without ASR and new sessions remain expl
  await page.getByText('默认面试配置',{exact:true}).click();
  await page.getByLabel('默认回答方式').selectOption('audio');
  await page.getByLabel('默认后台转写').uncheck();
- await page.getByLabel('默认音频模型').selectOption('omni-test');
+ await page.getByLabel('默认音频理解模型 · 百炼 API').fill('omni-test');
  await page.getByLabel('默认问题音频时长').fill('60');
  await page.getByRole('button',{name:'保存默认配置',exact:true}).click();
  expect(preferenceSeen[0]).toMatchObject({mode:'audio',transcribe:false,audioModel:'omni-test',audioWindowSeconds:60});
@@ -196,4 +196,56 @@ test('audio session triggers only on request and shows native answer with honest
  await page.screenshot({path:testInfo.outputPath('native-tablet.png'),fullPage:true});
  await page.getByRole('button',{name:'暂停会话',exact:true}).click();
  await expect(page.getByLabel('面试回答方式')).toBeEnabled();
+});
+
+test('screenshot models persist separately for each CLI and manual requests snapshot the selected model',async({page},testInfo)=>{
+ await prepare(page,true,'ended');
+ const saved=[],requests=[];
+ await page.route('**/api/model-preferences',async route=>{
+   const body=route.request().postDataJSON();saved.push(body);await route.fulfill({json:body});
+ });
+ await page.route('**/api/captures/capture-model/analyze',async route=>{
+   const body=route.request().postDataJSON();requests.push(body);
+   await route.fulfill({json:{task:{id:'model-task',captureId:'capture-model',provider:body.provider,model:body.model,status:'completed',answer:'模型已选择',promptName:'测试',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),sources:[]}}});
+ });
+ await page.getByText('截图默认配置',{exact:true}).click();
+ await page.getByLabel('Codex 截图模型 ID').fill('gpt-quality');
+ await page.getByLabel('Claude 截图模型 ID').fill('qwen-quality');
+ await page.getByLabel('截图默认执行方式').selectOption('claude');
+ await page.getByRole('button',{name:'保存截图默认配置',exact:true}).click();
+ await expect.poll(()=>saved.length).toBe(1);
+ expect(saved[0]).toEqual({preferences:{screenshot:{provider:'claude',models:{codex:'gpt-quality',claude:'qwen-quality'}}}});
+ await page.getByLabel('截图执行方式').selectOption('codex');
+ await expect(page.getByLabel('截图本次模型 ID')).toHaveValue('gpt-quality');
+ await page.getByLabel('截图执行方式').selectOption('claude');
+ await expect(page.getByLabel('截图本次模型 ID')).toHaveValue('qwen-quality');
+ await page.getByLabel('截图本次模型 ID').fill('qwen-once');
+ await page.evaluate(()=>window.__voiceSocket.onmessage({data:JSON.stringify({type:'capture.created',capture:{id:'capture-model',captureId:'capture-model',deviceId:null,createdAt:new Date().toISOString(),imageUrl:'/model.png'}})}));
+ await page.getByRole('button',{name:'开始分析',exact:true}).click();
+ await expect.poll(()=>requests.length).toBe(1);
+ expect(requests[0]).toMatchObject({provider:'claude',model:'qwen-once'});
+ await expect(page.getByText('Claude · qwen-once',{exact:true})).toBeVisible();
+ await page.screenshot({path:testInfo.outputPath('screenshot-models.png'),fullPage:true});
+});
+
+test('interview defaults distinguish ASR API from per-CLI text models and preserve both when switching',async({page},testInfo)=>{
+ const {preferenceSeen,seen}=await prepare(page,true,'ended',false,{audioConfigured:true});
+ await page.getByRole('button',{name:'面试会话',exact:true}).click();
+ await page.getByText('默认面试配置',{exact:true}).click();
+ await page.getByLabel('默认Codex 文字模型 ID').fill('gpt-flash');
+ await page.getByLabel('默认Claude 文字模型 ID').fill('qwen-flash');
+ await page.getByLabel('默认语音识别模型 · 百炼 API').fill('asr-streaming-custom');
+ await page.getByLabel('默认音频理解模型 · 百炼 API').fill('omni-flash-custom');
+ await page.getByLabel('默认回答模型').selectOption('claude');
+ await page.getByRole('button',{name:'保存默认配置',exact:true}).click();
+ await expect.poll(()=>preferenceSeen.length).toBe(1);
+ expect(preferenceSeen[0]).toMatchObject({provider:'claude',textModels:{codex:'gpt-flash',claude:'qwen-flash'},asrModel:'asr-streaming-custom',audioModel:'omni-flash-custom'});
+ await page.getByRole('button',{name:'创建面试会话',exact:true}).click();
+ await expect(page.getByLabel('新会话Claude 文字模型 ID')).toHaveValue('qwen-flash');
+ await page.getByLabel('新会话回答模型').selectOption('codex');
+ await expect(page.getByLabel('新会话Codex 文字模型 ID')).toHaveValue('gpt-flash');
+ await page.getByRole('button',{name:'保存并创建',exact:true}).click();
+ await expect.poll(()=>seen.length).toBe(1);
+ expect(seen[0]).toMatchObject({provider:'codex',textModels:{codex:'gpt-flash',claude:'qwen-flash'},asrModel:'asr-streaming-custom'});
+ await page.screenshot({path:testInfo.outputPath('interview-models.png'),fullPage:true});
 });

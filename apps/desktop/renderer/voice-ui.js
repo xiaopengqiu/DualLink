@@ -12,21 +12,22 @@
     catch(error){await api.audioCaptureFailed({token:control.token,error:error.message}).catch(()=>{});throw error;}
   }
   function formatTime(milliseconds){const seconds=Math.max(0,Math.floor(milliseconds/1000));return seconds>=3600?`${Math.floor(seconds/3600)}:${String(Math.floor(seconds/60)%60).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`:`${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`;}
+  function setModels(value){for(const provider of ['codex','claude','bailian'])ui('voice-'+provider+'-model').value=value.textModels?.[provider]||'';ui('voice-asr-model').value=value.asrModel||'';}
   function render(state){
     latest=state;const audio=state.audio||{phase:'idle',recoveries:[]};const active=['connecting','ready','recording','stopping','paused'].includes(audio.phase);
     ui('voice-status').textContent=preflight?'声音预检中':labels[audio.phase]||audio.phase;ui('voice-status').className='badge '+(audio.recording?'online':active?'waiting':'muted');
     ui('voice-recording-indicator').hidden=!(audio.recording||preflight);
-    if(!selectedDirty&&audio.config){const defaults=audio.config.defaults||{};ui('voice-mode').value=defaults.mode||'transcript';ui('voice-provider').value=defaults.provider||audio.config.defaultProvider||'codex';ui('voice-transcribe').checked=defaults.transcribe!==false;ui('voice-audio-window').value=defaults.audioWindowSeconds||120;}
+    if(!selectedDirty&&audio.config){const defaults=audio.config.defaults||{};ui('voice-mode').value=defaults.mode||'transcript';ui('voice-provider').value=defaults.provider||audio.config.defaultProvider||'codex';ui('voice-transcribe').checked=defaults.transcribe!==false;ui('voice-audio-window').value=defaults.audioWindowSeconds||120;setModels(defaults);}
     const selectedSession=(audio.interviews||[]).find(item=>item.id===ui('voice-existing').value);
     const session=active?audio.interview:selectedSession;
-    if(session){ui('voice-mode').value=session.mode||'transcript';ui('voice-provider').value=session.provider||'codex';ui('voice-transcribe').checked=session.transcribe!==false;ui('voice-audio-window').value=session.audioWindowSeconds||120;}
+    if(session){ui('voice-mode').value=session.mode||'transcript';ui('voice-provider').value=session.provider||'codex';ui('voice-transcribe').checked=session.transcribe!==false;ui('voice-audio-window').value=session.audioWindowSeconds||120;setModels(session);}
     const modelSelect=ui('voice-audio-model'),modelValue=session?.audioModel||(!selectedDirty?audio.config?.defaults?.audioModel:modelSelect.value)||'';
-    modelSelect.replaceChildren(new Option('使用服务器默认模型',''));for(const model of audio.config?.audioModels||[])modelSelect.add(new Option(model,model));modelSelect.value=modelValue;
+    const modelList=ui('voice-audio-model-list');modelList.replaceChildren();for(const model of audio.config?.audioModels||[])modelList.append(new Option(model,model));modelSelect.value=modelValue;
     const native=ui('voice-mode').value==='audio',configured=native?audio.config?.audioConfigured:audio.config?.configured;
-    ui('voice-native-options').hidden=!native;ui('voice-text-options').hidden=native;
+    ui('voice-native-options').hidden=!native;ui('voice-text-options').hidden=native;ui('voice-text-model-options').hidden=native;ui('voice-asr-options').hidden=native&&!ui('voice-transcribe').checked;ui('voice-bailian-model-field').hidden=ui('voice-provider').value!=='bailian';
     ui('voice-config-note').hidden=configured!==false;ui('voice-config-note').textContent=native?'服务端尚未配置百炼音频直答模型，请管理员配置后刷新。':'服务端尚未配置百炼实时语音识别，请管理员配置后刷新。';
     ui('voice-start').hidden=active;ui('voice-start').disabled=busy||!state.paired||configured===false;
-    for(const id of ['voice-mode','voice-audio-model','voice-transcribe','voice-audio-window'])ui(id).disabled=active||!!selectedSession;
+    for(const id of ['voice-mode','voice-audio-model','voice-transcribe','voice-audio-window','voice-codex-model','voice-claude-model','voice-bailian-model','voice-asr-model'])ui(id).disabled=active||!!selectedSession;
     const triggerLabels={syncing:'正在同步当前音频…',submitting:'正在提交当前问题…',queued:'已提交，等待生成',running:'正在生成建议',completed:'建议已生成',cancelled:'本次生成已取消',failed:'触发失败，请重试'};
     ui('voice-trigger').disabled=busy||!state.paired||!['recording','ready','paused'].includes(audio.phase)||['syncing','submitting'].includes(audio.triggerStatus);
     ui('voice-trigger-status').textContent=audio.triggerError||triggerLabels[audio.triggerStatus]||(active?'按快捷键或点击按钮生成建议':'开始录音后可触发回答');
@@ -59,7 +60,8 @@
     if(!state.paired)lastDevice=null;
   }
   async function loadMicrophones(request){const devices=await media.microphones(request);const selector=ui('voice-microphone'),value=selector.value;selector.replaceChildren(new Option('系统默认麦克风',''));for(const device of devices)selector.add(new Option(device.name,device.id));selector.value=value;}
-  for(const id of ['voice-provider','voice-mode','voice-audio-model','voice-transcribe','voice-audio-window','voice-existing'])ui(id).addEventListener('change',()=>{selectedDirty=true;if(latest)render(latest);});
+  for(const id of ['voice-provider','voice-mode','voice-audio-model','voice-transcribe','voice-audio-window','voice-existing','voice-codex-model','voice-claude-model','voice-bailian-model','voice-asr-model'])ui(id).addEventListener('change',()=>{selectedDirty=true;if(latest)render(latest);});
+  for(const id of ['voice-audio-model','voice-codex-model','voice-claude-model','voice-bailian-model','voice-asr-model'])ui(id).addEventListener('input',()=>{selectedDirty=true;});
   ui('voice-trigger').addEventListener('click',()=>void action(ui('voice-trigger'),()=>api.audioTrigger()));
   ui('voice-refresh').addEventListener('click',()=>void action(ui('voice-refresh'),()=>api.audioRefresh()));
   ui('voice-devices').addEventListener('click',()=>void action(ui('voice-devices'),()=>loadMicrophones(true)));
@@ -70,7 +72,7 @@
   }));
   ui('voice-preflight-stop').addEventListener('click',()=>void stopPreflight());
   ui('voice-start').addEventListener('click',()=>void action(ui('voice-start'),async()=>{
-    await stopPreflight();const control=await api.audioStart({title:ui('voice-title').value||'面试记录',provider:ui('voice-provider').value,mode:ui('voice-mode').value,audioModel:ui('voice-audio-model').value||undefined,transcribe:ui('voice-transcribe').checked,audioWindowSeconds:Number(ui('voice-audio-window').value),promptId:ui('voice-prompt').value||undefined,sessionId:ui('voice-existing').value||undefined,autoAnswer:ui('voice-auto-answer').checked,microphoneId:ui('voice-microphone').value});await startCapture(control);
+    await stopPreflight();const control=await api.audioStart({title:ui('voice-title').value||'面试记录',provider:ui('voice-provider').value,textModels:{codex:ui('voice-codex-model').value.trim(),claude:ui('voice-claude-model').value.trim(),bailian:ui('voice-bailian-model').value.trim()},asrModel:ui('voice-asr-model').value.trim()||undefined,mode:ui('voice-mode').value,audioModel:ui('voice-audio-model').value||undefined,transcribe:ui('voice-transcribe').checked,audioWindowSeconds:Number(ui('voice-audio-window').value),promptId:ui('voice-prompt').value||undefined,sessionId:ui('voice-existing').value||undefined,autoAnswer:ui('voice-auto-answer').checked,microphoneId:ui('voice-microphone').value});await startCapture(control);
   }));
   ui('voice-pause').addEventListener('click',()=>void action(ui('voice-pause'),async()=>{await media.stop();return api.audioPause();}));
   ui('voice-resume').addEventListener('click',()=>void action(ui('voice-resume'),async()=>{await stopPreflight();const control=await api.audioResume({microphoneId:ui('voice-microphone').value});await startCapture(control);}));

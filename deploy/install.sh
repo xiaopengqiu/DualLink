@@ -69,6 +69,7 @@ CODEX_HOME=/var/lib/dual-link/.codex
 CLAUDE_CONFIG_DIR=/var/lib/dual-link/.claude
 CODEX_LOAD_USER_CONFIG=false
 CLAUDE_SAFE_MODE=true
+CLAUDE_LOAD_USER_CONFIG=false
 AI_RUNNER_IMAGE=dual-link-ai:1.0.0
 # Enable voice with a key and workspace from the same Model Studio region.
 # DASHSCOPE_API_KEY=

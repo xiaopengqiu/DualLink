@@ -22,11 +22,12 @@ test('queue survives restart, preserves review setting and removes successful im
   try {
     const queue = new CaptureQueue(dir);
     await queue.load();
-    const job=await queue.add(Buffer.from('image'),{analyze:false,provider:'claude',deviceId:'pc1',name:'截图.png'});
+    const job=await queue.add(Buffer.from('image'),{analyze:false,provider:'claude',model:'quality-model',deviceId:'pc1',name:'截图.png'});
     const loaded=new CaptureQueue(dir);
     await loaded.load();
     assert.equal(loaded.items[0].captureId,job.captureId);
     assert.equal(loaded.items[0].analyze,false);
+    assert.equal(loaded.items[0].model,'quality-model');
     assert.equal((await loaded.read(job.captureId)).toString(),'image');
     await loaded.complete(job.captureId);
     assert.equal(loaded.items.length,0);
@@ -60,4 +61,13 @@ test('manual answer shortcut has a default and cannot conflict with either scree
  const {validateSettings}=require('../lib/core.cjs');assert.equal(validateSettings({}).answerShortcut,'Ctrl+Alt+Enter');
  assert.throws(()=>validateSettings({answerShortcut:'Ctrl+Alt+S'}),/快捷键/);
  assert.throws(()=>validateSettings({fullShortcut:'Control+Alt+Enter'}),/快捷键/);
+});
+
+test('screenshot selection follows account configuration while explicit local overrides stay separate',()=>{
+ const {validateSettings,screenshotSelection}=require('../lib/core.cjs');
+ const account={provider:'claude',models:{codex:'slow-codex',claude:'quality-qwen'}};
+ assert.deepEqual(screenshotSelection(validateSettings({provider:'codex'}),account),{provider:'claude',model:'quality-qwen'});
+ assert.deepEqual(screenshotSelection(validateSettings({useAccountModels:false,provider:'codex',models:{codex:'local-model',claude:'other'}}),account),{provider:'codex',model:'local-model'});
+ assert.throws(()=>validateSettings({models:{codex:'bad model'}}),/模型/);
+ assert.deepEqual(screenshotSelection(validateSettings({}),null),{provider:'codex',model:''});
 });

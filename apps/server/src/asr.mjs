@@ -16,7 +16,7 @@ export function asrConfiguration(options = {}) {
 /** Each call owns one independent remote/self ASR task. Credentials never cross client APIs. */
 export function createDashScopeAsrFactory(options = {}) {
   const config = asrConfiguration(options);
-  return async function start({ track, onResult = () => {}, onError = () => {}, onStatus = () => {}, hotwords = [], context = [] } = {}) {
+  return async function start({ track, model = config.model, onResult = () => {}, onError = () => {}, onStatus = () => {}, hotwords = [], context = [] } = {}) {
     if (!config.configured) throw new AsrError('ASR_NOT_CONFIGURED', '尚未配置实时语音识别，请管理员设置百炼 API Key、业务空间和地域');
     const url = new URL(config.wsUrl);
     if (url.protocol !== 'wss:' && !(url.protocol === 'ws:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))) throw new AsrError('ASR_INVALID_CONFIG', '语音识别接口必须使用安全 WebSocket 地址');
@@ -53,10 +53,10 @@ export function createDashScopeAsrFactory(options = {}) {
     socket.on('open', () => {
       const vocabulary = Object.fromEntries(hotwords.filter(word => typeof word === 'string' && word.trim() && word.length <= 80).slice(0, 200).map(word => [word.trim(), 3]));
       const parameters = { format: 'pcm', sample_rate: 16000, heartbeat: true, language_hints: ['zh', 'en'], ...(Object.keys(vocabulary).length ? { vocabulary } : {}) };
-      if (config.model.startsWith('qwen-audio-3.1-')) parameters.vad_model = 'near_meeting_16k';
+      if (model.startsWith('qwen-audio-3.1-')) parameters.vad_model = 'near_meeting_16k';
       else parameters.max_sentence_silence = Math.max(200, Math.min(6000, config.silenceMs || 600));
       const input = context.length ? { context: context.slice(-5) } : {};
-      socket.send(JSON.stringify({ header: { action: 'run-task', task_id: taskId, streaming: 'duplex' }, payload: { task_group: 'audio', task: 'asr', function: 'recognition', model: config.model, parameters, input } }));
+      socket.send(JSON.stringify({ header: { action: 'run-task', task_id: taskId, streaming: 'duplex' }, payload: { task_group: 'audio', task: 'asr', function: 'recognition', model, parameters, input } }));
     });
     socket.on('message', (bytes, binary) => {
       if (binary || terminalError || closed) return;

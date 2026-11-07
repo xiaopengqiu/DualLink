@@ -12,12 +12,14 @@ try{
   await page.getByRole('heading',{name:'连接你的下一块屏幕'}).waitFor();
   assert.equal(await page.getByRole('button',{name:'全屏截图',exact:false}).isEnabled(),false);
   await page.getByRole('button',{name:'偏好设置'}).click();
-  await page.getByLabel('默认模型服务').selectOption('claude');
+  await page.getByLabel('截图使用账号默认模型').uncheck();
+  await page.getByLabel('本机截图执行方式').selectOption('claude');
+  await page.getByLabel('截图 Claude 模型 ID').fill('test-quality');
   await page.getByRole('button',{name:'保存偏好设置'}).click();
   await page.getByText('✓ 设置已保存').waitFor();
   const renderer=await page.evaluate(()=>({node:typeof window.require}));
   assert.equal(renderer.node,'undefined');
-  const state=await page.evaluate(()=>window.dualLink.getState());assert.equal(state.settings.provider,'claude');
+  const state=await page.evaluate(()=>window.dualLink.getState());assert.equal(state.settings.provider,'claude');assert.equal(state.settings.models.claude,'test-quality');assert.equal(state.settings.useAccountModels,false);
   await page.getByRole('button',{name:'连接与截图'}).click();
   await fs.mkdir(path.join(root,'.local'),{recursive:true});
   await page.screenshot({path:path.join(root,'.local','desktop-smoke.png')});

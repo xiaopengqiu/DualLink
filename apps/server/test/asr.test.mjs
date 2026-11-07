@@ -61,6 +61,14 @@ test('ASR startup and finish have bounded waits; missing credentials never creat
   await assert.rejects(task.finish(), e => e.code === 'ASR_FINISH_TIMEOUT');
 });
 
+test('per-session ASR model reaches wire without changing another session factory default',async t=>{
+  const {seen,url}=await upstream(t);
+  const factory=module.createDashScopeAsrFactory({apiKey:'secret',wsUrl:url,model:'qwen-audio-3.1-asr-flash-streaming'});
+  const selected=await factory({track:'remote',model:'qwen-audio-3.0-asr-flash-streaming'});
+  assert.equal(seen.run.payload.model,'qwen-audio-3.0-asr-flash-streaming');assert.equal(seen.run.payload.parameters.vad_model,undefined);await selected.finish();
+  const other=await factory({track:'self'});assert.equal(seen.run.payload.model,'qwen-audio-3.1-asr-flash-streaming');assert.equal(seen.run.payload.parameters.vad_model,'near_meeting_16k');await other.finish();
+});
+
 test('ASR ignores heartbeat/foreign tasks and exposes safe errors rather than upstream secrets', async t => {
   assert.equal(typeof module.createDashScopeAsrFactory, 'function', 'ASR factory must exist');
   const results = [], errors = [];

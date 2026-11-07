@@ -87,9 +87,10 @@ test('Bailian text API streams only answer deltas, keeps history in the request 
   await new Promise(r=>server.listen(0,'127.0.0.1',r)); t.after(()=>new Promise(r=>server.close(r)));
   const runner=module.createTextRunner({textApiKey:'test-api-key',textBaseUrl:`http://127.0.0.1:${server.address().port}/v1`,textModel:'qwen-flash'});t.after(()=>runner.close());
   const deltas=[];const prompt='本人之前说数据库是SQLite。当前面试官问数据库选型。';
-  const result=await runner({provider:'bailian',jobDir,prompt,onDelta:d=>deltas.push(d)});
+  const result=await runner({provider:'bailian',jobDir,prompt,model:'qwen-custom-flash',onDelta:d=>deltas.push(d)});
   assert.equal(result.answer,'结论：使用SQLite'); assert.deepEqual(deltas,['结论','：使用SQLite']);
   assert.equal(request.authorization,'Bearer test-api-key');assert.equal(request.url,'/v1/chat/completions');
+  assert.equal(request.body.model,'qwen-custom-flash');
   assert.equal(request.body.enable_thinking,false);assert.equal(request.body.messages[1].content,prompt);
   assert.equal(result.usage.completion_tokens,10);
 });

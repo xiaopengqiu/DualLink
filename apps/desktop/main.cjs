@@ -7,7 +7,7 @@ const crypto=require('node:crypto');
 const {pathToFileURL}=require('node:url');
 const WebSocket=require('ws');
 const QRCode=require('qrcode');
-const {DEFAULT_SETTINGS,normalizeCloudUrl,validateSettings,cropRect}=require('./lib/core.cjs');
+const {DEFAULT_SETTINGS,normalizeCloudUrl,validateSettings,cropRect,screenshotSelection}=require('./lib/core.cjs');
 const {CaptureQueue}=require('./lib/queue.cjs');
 const {AudioController}=require('./lib/audio-main.cjs');
 
@@ -79,7 +79,7 @@ function disconnect(){generation++;clearTimeout(reconnectTimer);if(socket){socke
 async function revoked(){
   audioPermissionUntil=0;await audioController?.reset({removeLocal:true});
   disconnect();clearTimeout(pairTimer);pendingPair=null;credential=null;
-  state.device=null;state.user=null;state.pairing=null;state.lastCapture=null;lastImage=null;recent=[];
+  state.device=null;state.user=null;state.screenshotPreferences=null;state.pairing=null;state.lastCapture=null;lastImage=null;recent=[];
   for(const finish of [...directWaiters.values()])finish();directWaiters.clear();lanAttempted.clear();
   if(overlay&&!overlay.isDestroyed())overlay.destroy();
   await queue.clear();await persist();message('设备配对已撤销或账号不可用，请重新配对');
@@ -88,7 +88,7 @@ function scheduleReconnect(){if(quitting||!credential)return;state.connected=fal
 async function connect(){
   if(!credential||quitting)return;disconnect();const ownGeneration=generation;state.connecting=true;state.error='';changed();
   try{
-    const me=await api('/device/me');if(ownGeneration!==generation)return;state.device=me.device;state.user=me.user;
+    const me=await api('/device/me');if(ownGeneration!==generation)return;state.device=me.device;state.user=me.user;state.screenshotPreferences=me.settings?.screenshotPreferences||null;
     const config=await api('/config');const {ticket}=await api('/ws-ticket',{method:'POST',body:{kind:'desktop'}});if(ownGeneration!==generation)return;
     const url=new URL('/ws',credential.cloudUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.searchParams.set('ticket',ticket);
     const ws=new WebSocket(url,{maxPayload:256*1024,handshakeTimeout:15000,followRedirects:false});socket=ws;
@@ -123,7 +123,7 @@ async function saveSettings(input){
 async function unpair(){
   audioPermissionUntil=0;await audioController?.reset({removeLocal:true});
   if(credential)await api('/device/me',{method:'DELETE',timeout:4000}).catch(()=>{});
-  clearTimeout(pairTimer);pendingPair=null;disconnect();credential=null;state.pairing=null;state.device=null;state.user=null;lastImage=null;recent=[];state.lastCapture=null;await queue.clear();await persist();state.error='';changed();return snapshot();
+  clearTimeout(pairTimer);pendingPair=null;disconnect();credential=null;state.pairing=null;state.device=null;state.user=null;state.screenshotPreferences=null;lastImage=null;recent=[];state.lastCapture=null;await queue.clear();await persist();state.error='';changed();return snapshot();
 }
 async function screenshot(display){
   const sources=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:Math.round(display.bounds.width*display.scaleFactor),height:Math.round(display.bounds.height*display.scaleFactor)},fetchWindowIcons:false});
@@ -144,11 +144,14 @@ async function capture(mode){
   if(!credential)throw new Error('请先完成设备配对');if(capturing)return;capturing=true;const restore=win?.isVisible();
   const captureOwner=credential;
   try{
+    if(settings.useAccountModels){try{const result=await api('/model-preferences',{timeout:3000});if(credential===captureOwner)state.screenshotPreferences=result.preferences?.screenshot||null;}catch(error){if(error.status===401||error.status===403)throw error;}}
+    if(credential!==captureOwner)return;
+    const modelSelection=screenshotSelection(settings,state.screenshotPreferences);
     if(win?.isVisible())win.hide();await new Promise(r=>setTimeout(r,160));
     const display=screen.getAllDisplays().find(d=>String(d.id)===settings.displayId)||screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     let image=await screenshot(display);if(mode==='region')image=await chooseRegion(image,display);if(!image||credential!==captureOwner)return;
     let bytes=image.toPNG(),mime='image/png',extension='png';if(bytes.length>12*1024*1024){bytes=image.toJPEG(88);mime='image/jpeg';extension='jpg';}
-    const job=await queue.add(bytes,{deviceId:captureOwner.deviceId,analyze:settings.analyze,provider:settings.provider,mime,name:`截图 ${new Date().toLocaleString('zh-CN').replace(/[/:]/g,'-')}.${extension}`});
+    const job=await queue.add(bytes,{deviceId:captureOwner.deviceId,analyze:settings.analyze,...modelSelection,mime,name:`截图 ${new Date().toLocaleString('zh-CN').replace(/[/:]/g,'-')}.${extension}`});
     if(credential!==captureOwner){await queue.complete(job.captureId);return;}
     lastImage=image.toDataURL();state.lastCapture={captureId:job.captureId,createdAt:job.createdAt,width:image.getSize().width,height:image.getSize().height,status:'待上传'};
     recent=[{...state.lastCapture},...recent].slice(0,8);changed();processQueue().catch(message);
@@ -174,7 +177,7 @@ async function processQueue(){
         if(!lanAttempted.has(job.captureId)){lanAttempted.add(job.captureId);direct=await tryDirect(job,bytes);if(!settings.lanFirst)emit('capture-direct',{metadata:job,data:bytes.toString('base64')});}
         if(credential!==owner)break;
         if(!direct){
-          const form=new FormData();form.append('image',new Blob([bytes],{type:job.mime}),job.name);for(const key of ['captureId','deviceId','provider','analyze'])form.append(key,String(job[key]));
+          const form=new FormData();form.append('image',new Blob([bytes],{type:job.mime}),job.name);for(const key of ['captureId','deviceId','provider','model','analyze'])if(job[key]!==undefined&&job[key]!==null)form.append(key,String(job[key]));
           await api('/captures',{method:'POST',body:form,timeout:45000});
         }
         await queue.complete(job.captureId);lanAttempted.delete(job.captureId);const item=recent.find(x=>x.captureId===job.captureId);if(item)item.status=direct?'直传完成':'上传完成';if(state.lastCapture?.captureId===job.captureId)state.lastCapture.status=direct?'直传完成':'上传完成';state.error='';changed();

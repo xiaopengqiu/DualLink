@@ -19,7 +19,7 @@ docker version
 
 ## 2. 上传源码并安装
 
-上传 `release/DualLink-source-1.2.0.zip`，解压到临时目录，在源码根目录运行：
+上传 `release/DualLink-source-1.3.0.zip`，解压到临时目录，在源码根目录运行：
 
 ```bash
 sudo bash deploy/install.sh assistant.example.com docker

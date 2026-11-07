@@ -55,5 +55,8 @@ export function openDatabase(dataDir) {
     CREATE TABLE IF NOT EXISTS interview_triggers(session_id TEXT NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,request_id TEXT NOT NULL,question_id TEXT NOT NULL REFERENCES interview_questions(id) ON DELETE CASCADE,answer_id TEXT NOT NULL REFERENCES interview_answers(id) ON DELETE CASCADE,created_at TEXT NOT NULL,PRIMARY KEY(session_id,request_id));`);
   if (!db.prepare('PRAGMA table_info(interview_audio_frames)').all().some(c=>c.name==='active'))db.exec('ALTER TABLE interview_audio_frames ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
   if(!db.prepare('PRAGMA table_info(interview_triggers)').all().some(c=>c.name==='config_version'))db.exec('ALTER TABLE interview_triggers ADD COLUMN config_version INTEGER NOT NULL DEFAULT 0');
+  const modelMigrations = {tasks:{model:'TEXT'}, interviews:{text_models:"TEXT NOT NULL DEFAULT '{}'",asr_model:"TEXT NOT NULL DEFAULT ''"},interview_answers:{model:'TEXT'}};
+  for(const [table,columns] of Object.entries(modelMigrations)){const existing=new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(c=>c.name));for(const [name,type] of Object.entries(columns))if(!existing.has(name))db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);}
+  db.exec('CREATE TABLE IF NOT EXISTS model_preferences(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,value TEXT NOT NULL)');
   return db;
 }

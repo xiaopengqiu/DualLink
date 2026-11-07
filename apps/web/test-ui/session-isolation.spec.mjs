@@ -99,7 +99,7 @@ test('switching accounts clears RTC preview and private workspace drafts and rev
   await expect(page.getByAltText('正在上传的局域网截图')).toHaveCount(0);
   await expect(page.getByLabel('补充说明')).toHaveValue('');
   await expect(page.getByLabel('搜索截图历史')).toHaveValue('');
-  await expect(page.getByLabel('使用模型')).toHaveValue('codex');
+  await expect(page.getByLabel('截图执行方式')).toHaveValue('codex');
   await expect(page.getByRole('combobox', { name: '回答风格', exact: true })).toHaveValue('prompt-b');
   await expect(page.getByLabel('接收图片后自动分析')).toBeChecked();
   await expect(page.getByRole('button', { name: '上传截图', exact: true })).toBeEnabled();
