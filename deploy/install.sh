@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run from the extracted source directory. Existing /etc/dual-link.env is kept.
 set -euo pipefail
+# sudo or an explicit env PATH may omit the system administration tools.
+export PATH="${PATH:+$PATH:}/usr/local/sbin:/usr/sbin:/sbin"
 umask 077
 if [[ ${EUID} -ne 0 ]]; then
   printf '%s\n' '请使用 sudo bash deploy/install.sh http://公网IP:3000 [native|docker]'
@@ -12,7 +14,7 @@ if [[ "$CLI_MODE" != native && "$CLI_MODE" != docker ]]; then
   printf '%s\n' '第二个参数只能是 native 或 docker。'
   exit 1
 fi
-for command_name in node npm tar systemctl; do
+for command_name in node npm tar systemctl useradd runuser install id chown chmod; do
   command -v "$command_name" >/dev/null || { printf '缺少依赖：%s\n' "$command_name"; exit 1; }
 done
 node -e 'const [a,b]=process.versions.node.split(".").map(Number);if(a<22||(a===22&&b<14))process.exit(1)' || { printf '%s\n' '需要 Node.js 22.14 或更新版本。'; exit 1; }

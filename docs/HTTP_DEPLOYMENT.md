@@ -8,8 +8,11 @@
 cd /opt/dual-link-src/DualLink
 sudo git fetch origin --tags
 sudo git checkout v1.2.0
-sudo bash deploy/install.sh http://203.0.113.8:3000 native
+sudo env PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin \
+  bash deploy/install.sh http://203.0.113.8:3000 native
 ```
+
+安装脚本会补充系统管理命令的搜索路径。旧版脚本若提示 `useradd: command not found`，先使用上面的完整 PATH 重试；`runuser` 也通常位于 `/usr/sbin`。如果完整路径下仍找不到这些命令，需通过系统包管理器安装提供它们的软件包。
 
 首次安装自动生成下面这些配置。升级会保留已有环境文件，必须手动核对：
 
