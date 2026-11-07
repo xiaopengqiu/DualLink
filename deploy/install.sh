@@ -3,15 +3,11 @@
 set -euo pipefail
 umask 077
 if [[ ${EUID} -ne 0 ]]; then
-  printf '%s\n' '请使用 sudo bash deploy/install.sh your-domain.example [native|docker]'
+  printf '%s\n' '请使用 sudo bash deploy/install.sh http://公网IP:3000 [native|docker]'
   exit 1
 fi
-DOMAIN=${1:-}
+ADDRESS=${1:-}
 CLI_MODE=${2:-docker}
-if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-  printf '%s\n' '请提供已解析到此服务器的域名，例如 assistant.example.com。'
-  exit 1
-fi
 if [[ "$CLI_MODE" != native && "$CLI_MODE" != docker ]]; then
   printf '%s\n' '第二个参数只能是 native 或 docker。'
   exit 1
@@ -25,6 +21,19 @@ if [[ "$CLI_MODE" == docker ]]; then
   docker info >/dev/null
 fi
 SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+SETTINGS=$(node --input-type=module - "$SOURCE_DIR" "$ADDRESS" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const {deploymentSettings}=await import(pathToFileURL(process.argv[2]+'/apps/server/src/service-config.mjs'));
+try { const c=deploymentSettings(process.argv[3]); console.log([c.origin,c.host,c.port,c.secureCookies,c.trustProxy].join('\n')); }
+catch(e) { console.error(e.message);process.exit(1); }
+NODE
+) || exit 1
+mapfile -t VALUES <<< "$SETTINGS"
+SERVICE_ORIGIN=${VALUES[0]}
+SERVICE_HOST=${VALUES[1]}
+SERVICE_PORT=${VALUES[2]}
+SERVICE_SECURE=${VALUES[3]}
+SERVICE_PROXY=${VALUES[4]}
 APP_DIR=/opt/dual-link
 id duallink >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/dual-link --shell /bin/bash duallink
 install -d -m 750 -o duallink -g duallink "$APP_DIR" /var/lib/dual-link/data
@@ -42,12 +51,12 @@ if [[ "$CLI_MODE" == docker ]]; then
 fi
 if [[ ! -f /etc/dual-link.env ]]; then
   cat > /etc/dual-link.env <<EOF
-HOST=127.0.0.1
-PORT=3000
-PUBLIC_ORIGIN=https://$DOMAIN
+HOST=$SERVICE_HOST
+PORT=$SERVICE_PORT
+PUBLIC_ORIGIN=$SERVICE_ORIGIN
 DATA_DIR=/var/lib/dual-link/data
-SECURE_COOKIES=true
-TRUST_PROXY=1
+SECURE_COOKIES=$SERVICE_SECURE
+TRUST_PROXY=$SERVICE_PROXY
 DEFAULT_PROVIDER=codex
 WORKER_CONCURRENCY=1
 AI_TIMEOUT_MS=180000
@@ -88,5 +97,7 @@ systemctl enable dual-link
 printf '\n%s\n' '应用已安装，尚未启动。请依次完成：'
 printf '%s\n' '1. 编辑 /etc/dual-link.env 配置 AI 凭据，或为 duallink 用户登录 CLI。'
 printf '%s\n' '2. 创建管理员：sudo -u duallink -H node --env-file=/etc/dual-link.env /opt/dual-link/apps/server/src/admin.mjs --email YOUR_EMAIL --name 管理员'
-printf '%s\n' '3. 按 docs/DEPLOYMENT.md 配置 Caddy HTTPS 和阿里云安全组。'
+printf '%s\n' '3. 按 docs/DEPLOYMENT.md 配置对应端口的安全组；HTTPS 模式再配置代理。'
 printf '%s\n' '4. sudo systemctl start dual-link'
+
+printf "服务地址：%s\n已有配置保留，请核对 HOST/PORT/PUBLIC_ORIGIN/SECURE_COOKIES/TRUST_PROXY。\n" "$SERVICE_ORIGIN"

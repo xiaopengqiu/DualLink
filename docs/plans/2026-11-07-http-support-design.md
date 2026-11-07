@@ -1,0 +1,3 @@
+# HTTP direct IP support
+
+User explicitly requires public HTTP + IP + port. Accept HTTP/HTTPS origins in the client, retain credential/path validation, and accept a full origin in installation (legacy bare host means HTTPS). Direct HTTP derives bind-all address, supplied port, non-Secure cookies and no trusted reverse proxy. Production startup permits HTTP. Browser upload UUID must work without secure-context randomUUID; clipboard failure must remain recoverable. Existing same-origin/CSRF/owner checks remain enabled. Validate with parser/client tests, production cookie test, browser screenshot regressions without randomUUID, and actual non-loopback insecure-context Electron/WS integration. Deliver version1.1.1 and update repository/release/deployment guide.

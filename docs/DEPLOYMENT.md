@@ -1,5 +1,7 @@
 # 阿里云 Linux 部署指南
 
+仅有公网 IP 时，按 [HTTP + IP + 端口部署](HTTP_DEPLOYMENT.md) 操作；下文为可选 HTTPS 域名方案。1.1.1 起安装脚本支持完整 http(s) 服务地址。
+
 适用单台 Linux ECS/VPS。推荐 Ubuntu 22.04/24.04 或 Debian 12，Node.js 22.14+，可用域名。数据保存在服务器磁盘，不需要额外购买数据库。使用 Docker 时需要给任务容器留出内存；先以并发 1 验收再调整。
 
 ## 1. 准备域名和网络

@@ -1,5 +1,7 @@
 # 验证记录
 
+1.1.1 HTTP 修正：112/112 自动化测试通过；9/9 浏览器回归在禁用 secure-context randomUUID 后通过；打包后的真实 Electron 在非 localhost 的 HTTP 地址上通过登录、配对、网页截图上传、双轨 ASR 协议、实时回答、断线补传、暂停/继续/结束与导出。浏览器明确验证 isSecureContext=false。百炼仍使用协议测试服务，未声称真实云端 ASR 准确度已测。安装脚本通过 bash -n，部署地址推导与 production HTTP Cookie/CSRF 有专项测试；npm audit 为 0。真实公网 ECS 与实体 iPad 尚待用户环境验收。
+
 日期：2026-11-07（Asia/Shanghai）。环境：Windows x64、Node.js 22.14.0、Electron 45.2.3、Microsoft Edge / Chromium。所有测试账号和数据均使用隔离临时目录，结束后清理，不是生产默认账号。
 
 ## 已通过

@@ -1,3 +1,4 @@
+import { captureId } from './uuid.mjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { ArrowDownToLine, ArrowRight, BookOpen, Check, CheckCheck, ChevronRight, CircleHelp, Copy, FileText, ImagePlus, LayoutDashboard, Link2, LoaderCircle, LogOut, Maximize2, Monitor, MoreHorizontal, Plus, RefreshCw, ScanLine, Search, Settings2, ShieldCheck, Sparkles, Square, Tablet, Trash2, Upload, Users, Wifi, WifiOff, X } from 'lucide-react';
@@ -150,7 +151,7 @@ export default function App() {
     if (!file) return;
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) { notify('请选择 PNG、JPEG 或 WebP 图片', 'error'); return; }
     if (file.size > (config?.maxUploadBytes || 12 * 1024 * 1024)) { notify('图片过大，请上传不超过 12 MB 的图片', 'error'); return; }
-    const form = new FormData(); form.append('image', file); form.append('captureId', crypto.randomUUID()); form.append('provider', provider); form.append('analyze', String(autoAnalyze)); if (promptId) form.append('promptId', promptId); if (question) form.append('question', question);
+    const form = new FormData(); form.append('image', file); form.append('captureId', captureId()); form.append('provider', provider); form.append('analyze', String(autoAnalyze)); if (promptId) form.append('promptId', promptId); if (question) form.append('question', question);
     await perform('upload', async () => { const result = await api.request<CaptureResult>('/captures', { method: 'POST', body: form }); setCaptures(previous => upsert(previous, result.capture)); setSelectedId(result.capture.id); if (result.task) setTasks(previous => upsert(previous, result.task!)); setPage('workspace'); }, autoAnalyze ? '截图已提交，正在等待分析' : '截图已保存，可在预览后开始分析');
     if (uploadRef.current) uploadRef.current.value = '';
   };

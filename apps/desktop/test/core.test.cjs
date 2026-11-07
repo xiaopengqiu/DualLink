@@ -4,12 +4,14 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 
-test('cloud URL allows HTTPS and loopback development, rejects credentials and insecure hosts', () => {
+test('cloud URL allows public HTTP IP and port as well as HTTPS, rejects non-web URLs and credentials', () => {
   const {normalizeCloudUrl} = require('../lib/core.cjs');
   assert.equal(normalizeCloudUrl('https://example.com/'), 'https://example.com');
   assert.equal(normalizeCloudUrl('http://localhost:3000'), 'http://localhost:3000');
   assert.equal(normalizeCloudUrl('http://[::1]:3000/'), 'http://[::1]:3000');
-  for (const url of ['http://example.com','file:///x','https://a:b@example.com','https://example.com/?token=x','https://example.com/path','javascript:alert(1)']) {
+  assert.equal(normalizeCloudUrl('http://203.0.113.8:3080/'),'http://203.0.113.8:3080');
+  assert.equal(normalizeCloudUrl('http://example.com:8080'),'http://example.com:8080');
+  for (const url of ['file:///x','https://a:b@example.com','https://example.com/?token=x','https://example.com/path','javascript:alert(1)']) {
     assert.throws(() => normalizeCloudUrl(url));
   }
 });

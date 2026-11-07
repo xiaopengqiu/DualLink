@@ -3,8 +3,7 @@ const DEFAULT_SETTINGS=Object.freeze({cloudUrl:'',deviceName:'我的电脑',disp
 function normalizeCloudUrl(value){
   if(typeof value!=='string'||value.length>2048)throw new Error('请输入有效的云服务地址');
   let url;try{url=new URL(value.trim());}catch{throw new Error('请输入完整地址，例如 https://assist.example.com');}
-  const loopback=['localhost','127.0.0.1','[::1]'].includes(url.hostname);
-  if(url.protocol!=='https:'&&!(url.protocol==='http:'&&loopback))throw new Error('云服务必须使用 HTTPS；HTTP 仅允许本机开发地址');
+  if(!['http:','https:'].includes(url.protocol))throw new Error('云服务地址必须使用 HTTP 或 HTTPS');
   if(url.username||url.password||url.search||url.hash||url.pathname!=='/')throw new Error('服务地址只需域名和端口，不包含路径、账号或查询参数');
   return url.origin;
 }

@@ -46,16 +46,17 @@ const service=await createApp({dataDir:path.join(dataDir,'server'),secureCookies
   textRunner:async input=>{inputs.push(input.prompt);const answer=inputs.length===1?'测试建议：可以考虑 Redis。':'测试建议：根据你实际说过的本地缓存方案，说明取舍。';input.onDelta?.(answer.slice(0,5));input.onDelta?.(answer.slice(5));return {answer};},
   runner:async()=>({answer:'截图回归测试'})});
 service.createUser({email:'voice@test.example',name:'语音联调',password:'OnlyForTest42!',role:'admin'});
-await new Promise(resolve=>service.server.listen(0,'127.0.0.1',resolve));
+await new Promise(resolve=>service.server.listen(0,process.env.DUALLINK_HTTP_HOST?'0.0.0.0':'127.0.0.1',resolve));
 const audioSockets=new Set();
 service.server.on('upgrade',(request,socket)=>{if(new URL(request.url,'http://localhost').pathname==='/audio'){audioSockets.add(socket);socket.once('close',()=>audioSockets.delete(socket));}});
-const origin=`http://127.0.0.1:${service.server.address().port}`;
+const origin=`http://${process.env.DUALLINK_HTTP_HOST||'127.0.0.1'}:${service.server.address().port}`;
 const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 let browser,application;
 try{
   browser=await chromium.launch(existsSync(edge)?{executablePath:edge}:{});
   const page=await browser.newPage({viewport:{width:1180,height:820}});
   await page.goto(origin);
+  if(process.env.DUALLINK_HTTP_HOST)assert.equal(await page.evaluate(()=>window.isSecureContext),false,'verify actual insecure browser context');
   await page.getByLabel('邮箱地址').fill('voice@test.example');
   await page.getByLabel('登录密码').fill('OnlyForTest42!');
   await page.getByRole('button',{name:'进入工作空间'}).click();
@@ -72,6 +73,12 @@ try{
   await page.getByLabel('电脑配对码').fill(code);
   await page.getByRole('button',{name:'确认配对'}).click();
   await expect(desktop.locator('#connection-badge')).toHaveText('● 已连接',{timeout:15000});
+  if(process.env.DUALLINK_HTTP_HOST){
+    await page.getByRole('button',{name:'截图工作台',exact:true}).click();
+    await page.getByLabel('选择截图文件').setInputFiles({name:'http-test.png',mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF9sAAAAASUVORK5CYII=','base64')});
+    await expect.poll(()=>service.db.prepare('SELECT count(*) AS n FROM captures').get().n).toBe(1);
+    console.log('PASS: non-loopback HTTP browser login/pairing/screenshot upload without secure-context randomUUID');
+  }
   await page.getByRole('button',{name:'面试会话',exact:true}).click();
   let control=await desktop.evaluate(()=>window.dualLink.audioStart({title:'双轨联调记录',provider:'codex',autoAnswer:true}));
   await desktop.evaluate(token=>window.dualLink.audioCaptureStarted(token),control.token);

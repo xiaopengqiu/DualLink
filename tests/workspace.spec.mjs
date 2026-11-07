@@ -5,6 +5,7 @@ import sharp from 'sharp';
 
 const png = await sharp(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620"><rect width="1000" height="620" rx="12" fill="#172d29"/><rect width="1000" height="58" fill="#244039"/><circle cx="30" cy="29" r="7" fill="#efaa92"/><circle cx="55" cy="29" r="7" fill="#e4cc88"/><circle cx="80" cy="29" r="7" fill="#9bc5a4"/><text x="35" y="130" fill="#b2d7c9" font-size="23" font-family="monospace">QUESTION 01</text><text x="35" y="205" fill="white" font-size="48" font-family="sans-serif">What is the result of 2 + 2?</text><text x="35" y="310" fill="#d1e3d9" font-size="26" font-family="monospace">function solve() {</text><text x="75" y="365" fill="#b2d7c9" font-size="26" font-family="monospace">return 2 + 2;</text><text x="35" y="420" fill="#d1e3d9" font-size="26" font-family="monospace">}</text><text x="35" y="555" fill="#93b3a5" font-size="19" font-family="sans-serif">Dual Link - automated test image</text></svg>')).png().toBuffer();
 async function login(page) {
+  await page.addInitScript(() => { Object.defineProperty(crypto, 'randomUUID', {value:undefined, configurable:true}); });
   await page.goto('/');
   await page.getByLabel('邮箱地址').fill('admin@dual-link.test');
   await page.getByLabel('登录密码').fill('Test-only!DualLink42');

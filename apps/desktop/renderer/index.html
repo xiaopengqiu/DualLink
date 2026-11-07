@@ -10,7 +10,7 @@
     <button class="nav" data-tab="preferences"><span>⚙</span> 偏好设置</button>
     <div class="sidebar-tip"><span class="tip-icon">⌘</span><p>按下快捷键<br>灵感，即刻送达</p><small>截图会发送到你自己的云服务</small></div>
     <div class="sidebar-bottom"><span class="dot" id="side-dot"></span><div><strong id="side-status">尚未连接</strong><small id="side-user">配对你的第一台设备</small></div></div>
-    <div class="version">WINDOWS CLIENT · V1.1.0</div>
+    <div class="version">WINDOWS CLIENT · V1.1.1</div>
   </aside>
   <main>
     <header><div class="breadcrumb">我的工作空间 <span>/</span> <b id="breadcrumb-page">连接与截图</b></div><button id="open-web" class="button subtle" title="在浏览器打开云端网站" disabled>↗ 打开网页</button></header>
@@ -22,7 +22,7 @@
       <section id="workspace-tab">
         <section class="card setup-card" id="setup-card">
           <div class="card-title"><span class="step">01</span><div><h2>连接云服务</h2><p>使用 iPad 网页中的设备配对功能绑定电脑</p></div></div>
-          <form id="pair-form"><div class="field"><label for="cloud-url">云服务地址</label><input id="cloud-url" type="url" placeholder="https://assist.example.com" autocomplete="url" required><small>使用 HTTPS 域名，本地调试可使用 http://localhost:3000</small></div><div class="pair-row"><div class="field"><label for="device-name">电脑名称</label><input id="device-name" maxlength="80" placeholder="我的 Windows 电脑" required></div><button class="button primary" id="pair-button" type="submit">生成配对码 <span>→</span></button></div></form>
+          <form id="pair-form"><div class="field"><label for="cloud-url">云服务地址</label><input id="cloud-url" type="url" placeholder="http://203.0.113.8:3000" autocomplete="url" required><small>支持 http://公网IP:端口 或 HTTPS 域名</small></div><div class="pair-row"><div class="field"><label for="device-name">电脑名称</label><input id="device-name" maxlength="80" placeholder="我的 Windows 电脑" required></div><button class="button primary" id="pair-button" type="submit">生成配对码 <span>→</span></button></div></form>
           <div class="pair-code-area" id="pair-code-area" hidden><img id="pair-qr" alt="用 iPad 扫描配对二维码"><div><span class="tiny-label">在网页输入配对码</span><strong id="pair-code"></strong><p>同一账号打开网页 → 设备 → 输入此代码</p><small id="pair-expiry"></small><span class="waiting"><i></i> 正在等待 iPad 确认…</span></div></div>
         </section>
         <section class="connected-card card" id="connected-card" hidden><div class="computer-icon">▣</div><div class="connected-info"><h2 id="connected-name">我的电脑</h2><p id="connected-origin"></p><span id="connected-account"></span></div><button class="button subtle" id="reconnect">重新连接</button><button class="icon-button" id="unpair" title="解除配对" aria-label="解除配对">×</button></section>

@@ -1,8 +1,8 @@
 # 双端互联 · Dual Link
 
-下载客户端、完整源码包与编译后的网页：[v1.1.0 发布页面](https://github.com/xiaopengqiu/DualLink/releases/tag/v1.1.0)。编译产物通过 GitHub Releases 分发；Git 仓库保存源码，依赖通过 `npm ci` 安装。
+下载客户端、完整源码包与编译后的网页：[v1.1.1 发布页面](https://github.com/xiaopengqiu/DualLink/releases/tag/v1.1.1)。编译产物通过 GitHub Releases 分发；Git 仓库保存源码，依赖通过 `npm ci` 安装。
 
-自托管的 Windows → iPad 截图与实时语音问答工具。PC 快捷键截图或采集会议/麦克风声音，Linux 服务结合当前账号的 Prompt、知识库和会话历史生成回答，iPad 网页显示并保存结果。当前版本 **1.1.0**。
+自托管的 Windows → iPad 截图与实时语音问答工具。PC 快捷键截图或采集会议/麦克风声音，Linux 服务结合当前账号的 Prompt、知识库和会话历史生成回答，iPad 网页显示并保存结果。当前版本 **1.1.1**。
 
 ## 包含的功能
 
@@ -33,7 +33,7 @@ npm start
 npm run desktop
 ```
 
-客户端云服务地址填 `http://localhost:3000`，然后在网站「设备」页输入客户端显示的配对码。生产地址使用 HTTPS。
+客户端云服务地址填 `http://localhost:3000`，然后在网站「设备」页输入客户端显示的配对码。支持公网 `http://IP:端口` 和 HTTPS。仅有公网 IP 时见 [HTTP 部署步骤](docs/HTTP_DEPLOYMENT.md)。
 
 开发前端可另运行 `npm run dev:web`（Vite 代理 API 和 WebSocket 到本地 3000 端口）；此时把 `.env` 的 `PUBLIC_ORIGIN` 改为实际 Vite 地址（默认 `http://127.0.0.1:5173`），然后重启后端并通过该地址访问，以通过来源校验。后端热重载用 `npm run dev`。
 
@@ -58,7 +58,7 @@ npm run package:win
 sudo bash deploy/install.sh assistant.example.com docker
 ```
 
-该脚本安装文件和 systemd 服务，**不会自动启动服务或修改现有反向代理**。按脚本提示配置认证、创建管理员、配置 HTTPS 后启动。已有 CLI 的个人部署可将第二个参数改为 `native`。
+该脚本安装文件和 systemd 服务，**不会自动启动服务或修改现有反向代理**。按脚本提示配置认证、创建管理员、核对 HTTP 端口或配置 HTTPS 后启动。已有 CLI 的个人部署可将第二个参数改为 `native`。
 
 ## 验证和源码交付
 

@@ -29,7 +29,7 @@ export async function createApp(options = {}) {
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const db = openDatabase(dataDir);
   const app = express(); const server = createServer(app);
-  const secureCookies = options.secureCookies ?? (process.env.SECURE_COOKIES !== undefined ? process.env.SECURE_COOKIES === 'true' : process.env.NODE_ENV === 'production');
+  const secureCookies = options.secureCookies ?? (process.env.SECURE_COOKIES !== undefined ? process.env.SECURE_COOKIES === 'true' : (options.publicOrigin || process.env.PUBLIC_ORIGIN || '').startsWith('http:') ? false : process.env.NODE_ENV === 'production');
   const publicOrigin = options.publicOrigin || process.env.PUBLIC_ORIGIN || '';
   const defaultProvider = options.defaultProvider || process.env.DEFAULT_PROVIDER || 'codex';
   const sessionDays = 14;
@@ -80,7 +80,7 @@ export async function createApp(options = {}) {
   const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews });
   protectedRouter.use('/interviews', interviews.router);
 
-  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.1.0' }));
+  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.1.1' }));
   const loginLimit = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: '登录尝试过多，请 15 分钟后重试' } });
   app.post('/api/auth/login', loginLimit, asyncRoute(async (req, res) => {
     const email = typeof req.body.email === 'string' ? req.body.email.toLowerCase().trim() : '';

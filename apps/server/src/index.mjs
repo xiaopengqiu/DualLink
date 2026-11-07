@@ -1,9 +1,12 @@
 import { createApp } from './app.mjs';
+import { normalizeOrigin } from './service-config.mjs';
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be between 1 and 65535');
-if (process.env.NODE_ENV === 'production' && !/^https:\/\//.test(process.env.PUBLIC_ORIGIN || '')) throw new Error('Production requires PUBLIC_ORIGIN=https://your-domain');
+if (process.env.NODE_ENV === 'production' && !process.env.PUBLIC_ORIGIN) throw new Error('Production requires PUBLIC_ORIGIN=http(s)://your-host:port');
+if (process.env.PUBLIC_ORIGIN) normalizeOrigin(process.env.PUBLIC_ORIGIN);
+if (process.env.PUBLIC_ORIGIN?.startsWith('http:') && process.env.SECURE_COOKIES === 'true') throw new Error('HTTP 部署请设置 SECURE_COOKIES=false');
 const service = await createApp({
   cli: {
     mode: process.env.CLI_MODE || 'native',
