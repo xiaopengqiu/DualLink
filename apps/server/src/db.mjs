@@ -28,6 +28,13 @@ export function openDatabase(dataDir) {
   if (!ticketColumns.some(c => c.name === 'session_hash')) db.exec('ALTER TABLE ws_tickets ADD COLUMN session_hash TEXT');
   const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map(c => c.name));
   for (const [column, definition] of Object.entries({ stage: "TEXT NOT NULL DEFAULT 'queued'", style_snapshot: "TEXT NOT NULL DEFAULT ''", knowledge_ids: "TEXT NOT NULL DEFAULT '[]'", needs_retrieval: 'INTEGER NOT NULL DEFAULT 0', retrieval_warning: 'TEXT' })) if (!taskColumns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${definition}`);
+  for (const column of ['request_id', 'request_fingerprint']) if (!taskColumns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} TEXT`);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS tasks_request ON tasks(user_id,request_id) WHERE request_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS task_captures(task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,position INTEGER NOT NULL,PRIMARY KEY(task_id,capture_id),UNIQUE(task_id,position));
+    CREATE INDEX IF NOT EXISTS task_captures_image ON task_captures(capture_id);
+    INSERT OR IGNORE INTO task_captures(task_id,capture_id,position) SELECT id,capture_id,0 FROM tasks;
+  `);
   if (!db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'auto_analyze')) db.exec('ALTER TABLE users ADD COLUMN auto_analyze INTEGER NOT NULL DEFAULT 1');
   db.exec(`
     CREATE TABLE IF NOT EXISTS interviews(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'recording',provider TEXT NOT NULL,prompt_id TEXT,prompt_name TEXT NOT NULL,style_snapshot TEXT NOT NULL,knowledge_ids TEXT NOT NULL DEFAULT '[]',hotwords TEXT NOT NULL DEFAULT '[]',auto_answer INTEGER NOT NULL DEFAULT 1,recording_status TEXT NOT NULL DEFAULT 'awaiting_device',error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,ended_at TEXT);

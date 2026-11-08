@@ -9,7 +9,7 @@ All JSON responses are objects; errors: `{error: string, code?: string}`. Dates 
 - No public registration. CLI bootstrap `npm run admin -- --email <email> --name <name>` reads password from stdin (or DUALLINK_ADMIN_PASSWORD env); no default credentials.
 - `GET /admin/users` -> `{users}`; `POST /admin/users {email,name,password,dailyLimit?}` -> `{user}`; `PATCH /admin/users/:id {name?,disabled?,dailyLimit?,password?}` -> `{user}`. Prevent disabling last admin / self. Disabled users lose sessions, device access and websocket access.
 - `GET /config` authenticated -> `{providers:['codex','claude'],defaultProvider:'codex',iceServers:[],maxUploadBytes:number}`. Do not expose model secrets. Optional `GET /admin/diagnostics` -> non-secret CLI availability/version only.
-- Config also includes account `autoAnalyze:boolean`. Browser `PUT /settings {autoAnalyze}` saves it; automatic capture analysis requires both the PC request flag and account setting to be true. Explicit Analyze remains available.
+- Config retains legacy account `autoAnalyze:boolean` and `PUT /settings {autoAnalyze}` for API compatibility. From1.5.0 the official clients always upload with `analyze:false` and require explicit question submission; the automatic toggle is removed.
 
 ## Devices and pairing
 - Unauthenticated but rate-limited `POST /pairings {name,deviceSecret}` (32+ random bytes, generated on PC) -> `{id,code,expiresAt}` (code 8 chars; 5 min). DB stores only secret hash. `GET /pairings/:id` with bearer deviceSecret -> `{status:'pending'|'approved'|'expired',device?:Device}`; browser cannot claim secret.
@@ -28,7 +28,8 @@ All JSON responses are objects; errors: `{error: string, code?: string}`. Dates 
 ## Captures and tasks
 - Browser or device `POST /captures` multipart: `image` (PNG/JPEG/WebP max 12MiB), `captureId` UUID (idempotency key), optional `provider` codex|claude, `promptId`, `question` string, `analyze` 'true'|'false'. Device may only upload for itself; browser optional `deviceId` must be owned. -> `{capture,task:Task|null}`.
 - Capture `{id,captureId,deviceId:null|string,deviceName?,createdAt,imageUrl:'/api/captures/:id/image'}`.
-- Task `{id,captureId:internalCaptureId,provider,status:'queued'|'running'|'completed'|'failed'|'cancelled',answer,error:null|string,question,promptName,createdAt,updatedAt,sources:[{name,excerpt}],usage?:object}`. Task prompt is snapshotted at creation.
+- Task `{id,captureId:internalCaptureId,captureIds:internalCaptureId[],captures:Capture[],requestId:UUID|null,provider,model,status:'queued'|'running'|'completed'|'failed'|'cancelled',answer,error:null|string,question,promptName,createdAt,updatedAt,sources:[{name,excerpt}],usage?:object}`. `captureId` remains the first member for compatibility; `captureIds`/`captures` preserve submission order. Task prompt and model are snapshotted at creation.
+- `POST /captures/analyze {captureIds:UUID[],requestId:UUID,provider?,model?,promptId?,question?}` ->201 `{task}`. Authenticated browser or device. All images must belong to the account;1–20 unique images,12MiB each,96MiB combined. One batch creates one task and one quota event. Repeating the same requestId and payload returns the same task even after completion or default model changes; changing image order or configuration with that requestId returns409.
 - `GET /captures?limit=50` -> `{captures}`; `GET /captures/:id/image` browser OR device owned image; `DELETE /captures/:id` cancels related work and removes file.
 - `GET /tasks?limit=50` -> `{tasks}`; `GET /tasks/:id` -> `{task}`.
 - `POST /captures/:id/analyze {provider?,promptId?,question?}` -> `{task}`. Dedup active job for same capture; completed captures may be reanalyzed by explicit action. Enforce per-user daily limit and max pending work.
@@ -44,8 +45,8 @@ All JSON responses are objects; errors: `{error: string, code?: string}`. Dates 
 
 ## WebRTC screenshot protocol
 - RTCDataChannel ordered/reliable. PC sends JSON `{type:'capture.start',captureId,name,mime,size,deviceId}` then ArrayBuffer chunks <= 48KiB and JSON `{type:'capture.end',captureId}`. One active transfer per channel; max 12MiB, receive timeout, verify cumulative size. Sender uses bufferedAmount backpressure.
-- iPad creates Blob, previews and automatically uploads with same captureId if auto-analyze enabled (checkbox, default on), else stages pending screenshot and offers Analyze button. Cloud fallback upload by PC after 2 seconds uses same captureId; server deduplicates image and initial AI task. PC cloud default can upload immediately; LAN-first mode waits for receipt ACK `{type:'capture.ack',captureId}` only after cloud upload succeeds, then skips fallback. If web closes before upload PC still uploads.
-- Explicit manual review mode (`analyze:false`) is sent from PC settings and must be preserved across direct and fallback routes. PC capture.start includes `analyze:boolean`, `provider`, optional `promptId`; web may make auto behavior stricter but never bypass PC manual review.
+- PC holds screenshots locally until explicit answer trigger, seals a question batch and transfers its images with `analyze:false`. iPad creates Blob, previews and uploads with the same captureId, then replies `{type:'capture.ack',captureId,cloudCaptureId:result.capture.id}` only after persistence. PC cloud fallback after2seconds uses the same captureId; server deduplicates images. Missing/legacy ACK cloud ID falls back to idempotent cloud upload.
+- After every image in the sealed batch has a cloud ID, PC submits one `/captures/analyze` request with its persisted batch UUID as requestId. Later captures are staged for the next question. Reconnect never submits an untriggered local draft. WebRTC receiving never enables automatic per-image analysis.
 
 ## Ownership and source files
 - Root owns root package.json/lock, docs, deployment, release scripts, end-to-end tests.

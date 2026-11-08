@@ -1,6 +1,6 @@
 import { api, ApiError } from './api';
 import type { AppConfig, Capture, CaptureResult, Device, Peer, Task } from './types';
-import { CaptureAssembler, shouldAnalyze } from './transfer.mjs';
+import { CaptureAssembler } from './transfer.mjs';
 import type { CaptureMetadata } from './transfer.mjs';
 import type { InterviewEvent } from './interview-types';
 
@@ -33,8 +33,8 @@ export class RealtimeClient {
   private stagedIce = new Map<string, { createdAt: number; candidates: RTCIceCandidateInit[] }>();
   private peerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private lastPeerRequest = new Map<string, number>();
-  private uploaded = new Set<string>();
-  private uploading = new Map<string, Promise<void>>();
+  private uploaded = new Map<string, string>();
+  private uploading = new Map<string, Promise<string>>();
   constructor(private callbacks: Callbacks) {}
 
   start() { void this.connect(); window.addEventListener('online', this.handleOnline); }
@@ -227,13 +227,14 @@ export class RealtimeClient {
       try {
         const capture = assembler.push(event.data);
         if (!capture) return;
-        const ack = () => { if (channel.readyState === 'open' && !this.disposed) channel.send(JSON.stringify({ type: 'capture.ack', captureId: capture.metadata.captureId })); };
-        if (this.uploaded.has(capture.metadata.captureId)) { ack(); return; }
+        const ack = (cloudCaptureId: string) => { if (channel.readyState === 'open' && !this.disposed) channel.send(JSON.stringify({ type: 'capture.ack', captureId: capture.metadata.captureId, cloudCaptureId })); };
+        const uploadedId = this.uploaded.get(capture.metadata.captureId);
+        if (uploadedId) { ack(uploadedId); return; }
         let pending = this.uploading.get(capture.metadata.captureId);
         if (!pending) {
           const blob = new Blob([capture.bytes.slice().buffer as ArrayBuffer], { type: capture.metadata.mime });
           this.callbacks.onPreview(blob, capture.metadata);
-          pending = this.uploadCapture(blob, capture.metadata).then(() => { this.uploaded.add(capture.metadata.captureId); if (this.uploaded.size > 200) this.uploaded.delete(this.uploaded.values().next().value!); }).finally(() => this.uploading.delete(capture.metadata.captureId));
+          pending = this.uploadCapture(blob, capture.metadata).then(result => { this.uploaded.set(capture.metadata.captureId, result.capture.id); if (this.uploaded.size > 200) this.uploaded.delete(this.uploaded.keys().next().value!); return result.capture.id; }).finally(() => this.uploading.delete(capture.metadata.captureId));
           this.uploading.set(capture.metadata.captureId, pending);
         }
         void pending.then(ack).catch(error => {
@@ -246,11 +247,12 @@ export class RealtimeClient {
   private async uploadCapture(blob: Blob, metadata: CaptureMetadata) {
     const form = new FormData();
     form.append('image', blob, metadata.name); form.append('captureId', metadata.captureId);
-    form.append('deviceId', metadata.deviceId); form.append('analyze', String(shouldAnalyze(metadata, this.callbacks.autoAnalyze())));
+    form.append('deviceId', metadata.deviceId); form.append('analyze', 'false');
     if (metadata.provider) form.append('provider', metadata.provider);
     if (typeof metadata.model === 'string') form.append('model', metadata.model);
     if (metadata.promptId) form.append('promptId', metadata.promptId);
     const result = await api.request<CaptureResult>('/captures', { method: 'POST', body: form, signal: this.abort.signal });
     if (!this.disposed) this.callbacks.onUploaded(result);
+    return result;
   }
 }

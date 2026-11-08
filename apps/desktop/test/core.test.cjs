@@ -63,6 +63,11 @@ test('manual answer shortcut has a default and cannot conflict with either scree
  assert.throws(()=>validateSettings({fullShortcut:'Control+Alt+Enter'}),/快捷键/);
 });
 
+test('upgrading legacy settings cannot reenable per-screenshot automatic answers',()=>{
+ const {validateSettings,DEFAULT_SETTINGS}=require('../lib/core.cjs');
+ assert.equal(DEFAULT_SETTINGS.analyze,false);assert.equal(validateSettings({analyze:true}).analyze,false);
+});
+
 test('startup update checking defaults on for old settings and accepts only a boolean',()=>{
  const {validateSettings}=require('../lib/core.cjs');
  assert.equal(validateSettings({}).autoCheckUpdates,true);

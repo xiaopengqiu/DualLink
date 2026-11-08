@@ -341,7 +341,8 @@ test('only browser administrators can save shared AI profiles; secrets remain en
   assert.equal(saved.status,200);
   const body=await saved.json();assert.equal(body.profiles['screenshot.claude'].hasApiKey,true);assert.equal(body.profiles['screenshot.claude'].apiKey,undefined);assert(!JSON.stringify(body).includes(secret));
   const stored=s.db.prepare('SELECT value FROM service_ai WHERE id=1').get().value;assert(!stored.includes(secret));assert(!Buffer.from(stored,'base64').toString().includes(secret));
-  assert.equal((await stat(path.join(s.dataDir,'.ai-settings.key'))).mode&0o777,0o600);
+  const keyInfo=await stat(path.join(s.dataDir,'.ai-settings.key'));assert.equal(keyInfo.isFile(),true);
+  if(process.platform!=='win32')assert.equal(keyInfo.mode&0o777,0o600);
   const runtime=createAiSettings({db:s.db,dataDir:s.dataDir});
   assert.equal(runtime.cli('screenshot','claude').extraEnv.ANTHROPIC_AUTH_TOKEN,secret);
   assert.equal(runtime.cli('transcript','claude').extraEnv.ANTHROPIC_AUTH_TOKEN,'fixture-text-token');

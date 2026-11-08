@@ -1,4 +1,4 @@
-# 公网 IP + HTTP + 端口部署（1.4.1）
+# 公网 IP + HTTP + 端口部署（1.5.0）
 
 支持直接填写 `http://公网IP:端口`。不需要域名、证书或 Caddy。HTTP 不提供 TLS 加密，登录凭据、截图和音频会经过明文连接；HTTPS 仍可选。
 
@@ -7,7 +7,7 @@
 ```bash
 cd /opt/dual-link-src/DualLink
 sudo git fetch origin --tags
-sudo git checkout v1.4.1
+sudo git checkout v1.5.0
 sudo env PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin \
   bash deploy/install.sh http://203.0.113.8:3000 native
 ```
@@ -46,7 +46,7 @@ sudo systemctl status dual-link --no-pager
 curl -fsS http://127.0.0.1:3000/api/health
 ```
 
-然后 iPad 浏览器和 1.4.1 PC 客户端均填写 `http://203.0.113.8:3000`，登录、配对并测试截图及语音。HTTP 自动使用 `ws://` 进行实时同步和语音上传。语音从 PC 本地采集，不需要网页申请麦克风权限。部分浏览器在公网 HTTP 下限制 WebRTC 或剪贴板，截图会走云端上传，回答可以手动选择复制。按账号分别设置截图与面试模型，见[模型配置指南](MODEL_CONFIGURATION.md)。
+然后 iPad 浏览器和 1.5.0 PC 客户端均填写 `http://203.0.113.8:3000`，登录、配对并测试截图及语音。截图先保存在本机，明确触发后整题提交，详见[多图整题回答](SCREENSHOT_BATCHES.md)。HTTP 自动使用 `ws://` 进行实时同步和语音上传。语音从 PC 本地采集，不需要网页申请麦克风权限。部分浏览器在公网 HTTP 下限制 WebRTC 或剪贴板，截图会走云端上传，回答可以手动选择复制。按账号分别设置截图与面试模型，见[模型配置指南](MODEL_CONFIGURATION.md)。
 
 排查连接：
 

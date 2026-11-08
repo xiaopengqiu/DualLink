@@ -6,7 +6,7 @@ import multer from 'multer';
 import sharp from 'sharp';
 import { createServer } from 'node:http';
 import { randomUUID, randomBytes } from 'node:crypto';
-import { mkdir, writeFile, unlink, stat } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, stat, link } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase } from './db.mjs';
@@ -68,11 +68,27 @@ export async function createApp(options = {}) {
   const protectedRouter = express.Router(); protectedRouter.use(requireAuth, csrf);
   const adminOnly = (req, res, next) => { if (req.identity?.kind !== 'web' || req.identity.role !== 'admin') return next(Object.assign(new Error('需要管理员权限'), { status: 403 })); next(); };
   const userRow = id => db.prepare('SELECT * FROM users WHERE id=?').get(id);
+  const liveIdentity = req => {
+    const identity = req.identity, user = identity && userRow(identity.userId);
+    if (!user || user.disabled) fail(401, '账号或连接已失效，请重新登录或配对');
+    if (identity.kind === 'device') {
+      if (!db.prepare('SELECT id FROM devices WHERE id=? AND user_id=? AND token_hash=?').get(identity.deviceId, identity.userId, identity.device.token_hash)) fail(401, '设备配对已撤销，请重新配对');
+    } else if (!db.prepare('SELECT token_hash FROM sessions WHERE token_hash=? AND user_id=? AND expires_at>?').get(identity.tokenHash, identity.userId, now())) fail(401, '登录已失效，请重新登录');
+    return user;
+  };
   const screenshotPreferences = uid => ({ provider: defaultProvider, models: {codex:'',claude:''}, ...jsonParse(db.prepare('SELECT value FROM model_preferences WHERE user_id=?').get(accountAi.owner() || uid)?.value,{}) });
   const owned = (table, id, userId) => { const r = db.prepare(`SELECT * FROM ${table} WHERE id=? AND user_id=?`).get(id, userId); if (!r) fail(404, '记录不存在'); return r; };
+  const ownedCapture = (id, userId) => { const row = db.prepare('SELECT * FROM captures WHERE id=? AND user_id=?').get(id, userId); if (!row) fail(404, '本题截图已被删除，请重新上传本机缓存后重试', 'CAPTURE_NOT_FOUND'); return row; };
   const promptView = p => ({ id: p.id, name: p.name, content: p.content, isDefault: !!p.is_default, version: p.version, createdAt: p.created_at, updatedAt: p.updated_at });
   const knowledgeView = k => ({ id: k.id, name: k.name, size: k.size, status: k.status, error: k.error, characters: k.text.length, createdAt: k.created_at });
-  const taskView = t => ({ id: t.id, captureId: t.capture_id, provider: t.provider, model:t.model || null, status: t.status, stage: t.stage, answer: t.answer, error: t.error, retrievalWarning: t.retrieval_warning || null, question: t.question, promptName: t.prompt_name, createdAt: t.created_at, updatedAt: t.updated_at, sources: jsonParse(t.sources, []), usage: jsonParse(t.usage, undefined) });
+  const taskCaptures = t => {
+    const captures = db.prepare('SELECT c.* FROM task_captures tc JOIN captures c ON c.id=tc.capture_id WHERE tc.task_id=? ORDER BY tc.position').all(t.id);
+    return captures.length ? captures : db.prepare('SELECT * FROM captures WHERE id=?').all(t.capture_id);
+  };
+  const taskView = t => {
+    const captures = taskCaptures(t);
+    return { id: t.id, captureId: t.capture_id, captureIds: captures.map(c => c.id), captures: captures.map(captureView), requestId: t.request_id || null, provider: t.provider, model:t.model || null, status: t.status, stage: t.stage, answer: t.answer, error: t.error, retrievalWarning: t.retrieval_warning || null, question: t.question, promptName: t.prompt_name, createdAt: t.created_at, updatedAt: t.updated_at, sources: jsonParse(t.sources, []), usage: jsonParse(t.usage, undefined) };
+  };
   let realtime;
   const deviceView = d => ({ id: d.id, name: d.name, createdAt: d.created_at, lastSeenAt: d.last_seen_at, online: realtime?.isOnline(d.id) || false });
   const devicesFor = userId => db.prepare('SELECT * FROM devices WHERE user_id=? ORDER BY created_at DESC').all(userId).map(deviceView);
@@ -84,7 +100,7 @@ export async function createApp(options = {}) {
   const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, audioRunner: options.audioRunner, omni: options.omni, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews, accountAi });
   protectedRouter.use('/interviews', interviews.router);
 
-  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.4.1' }));
+  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.5.0' }));
   const loginLimit = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: '登录尝试过多，请 15 分钟后重试' } });
   app.post('/api/auth/login', loginLimit, asyncRoute(async (req, res) => {
     const email = typeof req.body.email === 'string' ? req.body.email.toLowerCase().trim() : '';
@@ -270,9 +286,21 @@ export async function createApp(options = {}) {
   protectedRouter.get('/knowledge/:id/download', browserOnly, (req, res) => { const file = owned('knowledge', req.params.id, req.identity.userId); res.download(path.join(dataDir, file.path), file.name); });
   protectedRouter.delete('/knowledge/:id', browserOnly, asyncRoute(async (req, res) => { const file = owned('knowledge', req.params.id, req.identity.userId); db.prepare('DELETE FROM knowledge WHERE id=?').run(file.id); await unlink(path.join(dataDir, file.path)).catch(() => {}); res.json({ ok: true }); }));
 
-  function createTask(uid, captureId, input = {}, dedup = true) {
+  function createTask(uid, captureId, input = {}, dedup = true, request = null) {
     return db.transaction(() => {
-      if (dedup) { const active = db.prepare("SELECT * FROM tasks WHERE capture_id=? AND user_id=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1").get(captureId, uid); if (active) return taskView(active); }
+      const captureIds = Array.isArray(captureId) ? captureId : [captureId];
+      if (request) {
+        const existing = db.prepare('SELECT * FROM tasks WHERE user_id=? AND request_id=?').get(uid, request.id);
+        if (existing) {
+          if (existing.request_fingerprint !== request.fingerprint) fail(409, '本次回答标识已用于不同的截图或回答配置');
+          return taskView(existing);
+        }
+      }
+      for (const id of captureIds) ownedCapture(id, uid);
+      if (dedup) {
+        const active = db.prepare("SELECT * FROM tasks WHERE capture_id=? AND user_id=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1").get(captureIds[0], uid);
+        if (active && taskCaptures(active).length === 1) return taskView(active);
+      }
       const u = userRow(uid); const today = new Date().toISOString().slice(0, 10);
       if (db.prepare('SELECT count(*) AS n FROM quota_events WHERE user_id=? AND created_at>=?').get(uid, today).n >= u.daily_limit) fail(429, '已达到今日任务额度');
       if (db.prepare("SELECT count(*) AS n FROM tasks WHERE user_id=? AND status IN ('queued','running')").get(uid).n >= 5) fail(429, '待处理任务过多，请稍后再试');
@@ -287,7 +315,10 @@ export async function createApp(options = {}) {
       const files = db.prepare("SELECT id,name,text FROM knowledge WHERE user_id=? AND status='ready'").all(uid);
       const sources = selectSources(files, question);
       const id = randomUUID(), timestamp = now();
-      db.prepare("INSERT INTO tasks(id,user_id,capture_id,provider,status,question,prompt_name,prompt_snapshot,sources,created_at,updated_at) VALUES(?,?,?,?,'queued',?,?,?,?,?,?)").run(id, uid, captureId, provider, question, prompt.name, buildPrompt(prompt.content, question, sources), JSON.stringify(sources), timestamp, timestamp);
+      db.prepare("INSERT INTO tasks(id,user_id,capture_id,provider,status,question,prompt_name,prompt_snapshot,sources,created_at,updated_at) VALUES(?,?,?,?,'queued',?,?,?,?,?,?)").run(id, uid, captureIds[0], provider, question, prompt.name, buildPrompt(prompt.content, question, sources, captureIds.length), JSON.stringify(sources), timestamp, timestamp);
+      const member = db.prepare('INSERT INTO task_captures(task_id,capture_id,position) VALUES(?,?,?)');
+      captureIds.forEach((capture, position) => member.run(id, capture, position));
+      if (request) db.prepare('UPDATE tasks SET request_id=?,request_fingerprint=? WHERE id=?').run(request.id, request.fingerprint, id);
       db.prepare('UPDATE tasks SET style_snapshot=?,knowledge_ids=?,needs_retrieval=? WHERE id=?').run(prompt.content, JSON.stringify(files.map(f => f.id)), files.reduce((total, f) => total + f.text.length, 0) > 14000 ? 1 : 0, id);
       db.prepare('UPDATE tasks SET model=? WHERE id=?').run(model||null,id);
       db.prepare('INSERT INTO quota_events(id,user_id,created_at) VALUES(?,?,?)').run(randomUUID(), uid, timestamp);
@@ -295,25 +326,50 @@ export async function createApp(options = {}) {
     })();
   }
   const uploadImage = multer({ storage: multer.memoryStorage(), limits: { fileSize: imageMax, files: 1, fields: 10, fieldSize: 40000 } }).single('image');
+  async function screenshotMetadata(bytes) {
+    let metadata; try { metadata = await sharp(bytes, { limitInputPixels: 40_000_000, failOn: 'error' }).metadata(); } catch { fail(400, '图片无效或像素过大'); }
+    if (!['png', 'jpeg', 'webp'].includes(metadata.format) || metadata.pages > 1) fail(400, '只支持静态 PNG、JPEG、WebP 图片');
+    return metadata;
+  }
   protectedRouter.post('/captures', uploadImage, asyncRoute(async (req, res) => {
     if (!req.file) fail(400, '请选择截图图片');
     const key = req.body.captureId; if (!UUID.test(key || '')) fail(400, 'captureId 必须是 UUID');
     const uid = req.identity.userId;
     const existing = db.prepare('SELECT * FROM captures WHERE user_id=? AND capture_key=?').get(uid, key);
-    if (existing) { const task = db.prepare('SELECT * FROM tasks WHERE capture_id=? ORDER BY created_at LIMIT 1').get(existing.id); return res.json({ capture: captureView(existing), task: task ? taskView(task) : null }); }
+    if (existing) {
+      const filename = path.join(dataDir, existing.path);
+      let info; try { info = await stat(filename); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      liveIdentity(req); ownedCapture(existing.id, uid);
+      if (!info?.isFile()) {
+        const metadata = await screenshotMetadata(req.file.buffer); liveIdentity(req);
+        if (`image/${metadata.format}` !== existing.mime) fail(409, '恢复截图必须使用原来的图片格式', 'CAPTURE_FORMAT_MISMATCH');
+        const temporary = filename + '.' + randomUUID() + '.restore';
+        try {
+          await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 }); liveIdentity(req);
+          await writeFile(temporary, req.file.buffer, { mode: 0o600, flag: 'wx' });
+          liveIdentity(req); ownedCapture(existing.id, uid);
+          // A hard link publishes the complete validated file atomically and
+          // cannot overwrite a competing repair of the same immutable key.
+          try { await link(temporary, filename); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+          liveIdentity(req); ownedCapture(existing.id, uid);
+        } finally { await unlink(temporary).catch(() => {}); }
+      }
+      const task = db.prepare('SELECT * FROM tasks WHERE capture_id=? ORDER BY created_at LIMIT 1').get(existing.id);
+      return res.json({ capture: captureView(existing), task: task ? taskView(task) : null });
+    }
     const storage = db.prepare('SELECT count(*) AS n FROM captures WHERE user_id=?').get(uid).n;
     if (storage >= 5000) fail(400, '截图数量已达上限，请先删除历史截图');
-    let metadata; try { metadata = await sharp(req.file.buffer, { limitInputPixels: 40_000_000, failOn: 'error' }).metadata(); } catch { fail(400, '图片无效或像素过大'); }
-    if (!['png', 'jpeg', 'webp'].includes(metadata.format) || metadata.pages > 1) fail(400, '只支持静态 PNG、JPEG、WebP 图片');
+    const metadata = await screenshotMetadata(req.file.buffer); liveIdentity(req);
     const analyze = (req.body.analyze === undefined || req.body.analyze === 'true') && !!userRow(uid).auto_analyze;
     if (req.body.analyze !== undefined && !['true', 'false'].includes(req.body.analyze)) fail(400, 'analyze 必须为 true 或 false');
     let deviceId = req.identity.deviceId || req.body.deviceId || null; if (deviceId) owned('devices', deviceId, uid);
     const id = randomUUID(); const relative = path.join('users', uid, 'screenshots', `${id}.${metadata.format === 'jpeg' ? 'jpg' : metadata.format}`);
-    await mkdir(path.dirname(path.join(dataDir, relative)), { recursive: true, mode: 0o700 });
+    await mkdir(path.dirname(path.join(dataDir, relative)), { recursive: true, mode: 0o700 }); liveIdentity(req);
     await writeFile(path.join(dataDir, relative), req.file.buffer, { mode: 0o600 });
     let task;
     try {
       db.transaction(() => {
+        liveIdentity(req); if (deviceId) owned('devices', deviceId, uid);
         // A competing upload may have completed while validating the image.
         const race = db.prepare('SELECT * FROM captures WHERE user_id=? AND capture_key=?').get(uid, key);
         if (race) return;
@@ -330,10 +386,39 @@ export async function createApp(options = {}) {
   const limit = req => Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50));
   protectedRouter.get('/captures', (req, res) => res.json({ captures: db.prepare('SELECT * FROM captures WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit(req)).map(captureView) }));
   protectedRouter.get('/captures/:id/image', (req, res) => { const c = owned('captures', req.params.id, req.identity.userId); res.type(c.mime).sendFile(path.join(dataDir, c.path)); });
+  protectedRouter.post('/captures/analyze', asyncRoute(async (req, res) => {
+    const uid = req.identity.userId, { captureIds, requestId } = req.body;
+    if (!Array.isArray(captureIds) || captureIds.length < 1 || captureIds.length > 20 || captureIds.some(id => typeof id !== 'string' || !UUID.test(id)) || new Set(captureIds).size !== captureIds.length) fail(400, '每次回答需包含 1–20 张不同的截图，captureIds 必须是有序 UUID 数组');
+    if (typeof requestId !== 'string' || !UUID.test(requestId)) fail(400, 'requestId 必须是 UUID');
+    const requestFingerprint = JSON.stringify({ captureIds, provider: req.body.provider ?? null, model: req.body.model ?? null, promptId: req.body.promptId ?? null, question: req.body.question ?? '' });
+    // Return a lost acknowledgement even after completion or a preference change,
+    // without consuming quota or rebuilding a previously snapshotted request.
+    const existing = db.prepare('SELECT * FROM tasks WHERE user_id=? AND request_id=?').get(uid, requestId);
+    if (existing) {
+      if (existing.request_fingerprint !== requestFingerprint) fail(409, '本次回答标识已用于不同的截图或回答配置');
+      return res.status(201).json({ task: taskView(existing) });
+    }
+    const captures = captureIds.map(id => ownedCapture(id, uid));
+    let total = 0;
+    for (const capture of captures) {
+      let info; try { info = await stat(path.join(dataDir, capture.path)); } catch (error) { if (error.code !== 'ENOENT') throw error; fail(409, '本题截图文件已丢失，请重新上传本机缓存后重试', 'CAPTURE_FILE_MISSING'); }
+      liveIdentity(req);
+      if (!info.isFile() || info.size > imageMax) fail(400, '单张截图不能超过 12 MiB');
+      total += info.size;
+    }
+    if (total > 96 * 1024 * 1024) fail(400, '同一次回答的截图合计不能超过 96 MiB，请减少截图');
+    liveIdentity(req);
+    const task = createTask(uid, captureIds, req.body, false, { id: requestId, fingerprint: requestFingerprint });
+    realtime.publish(uid, { type: 'task.updated', task }); res.status(201).json({ task });
+  }));
   protectedRouter.delete('/captures/:id', browserOnly, asyncRoute(async (req, res) => {
     const c = owned('captures', req.params.id, req.identity.userId);
-    for (const t of db.prepare('SELECT id FROM tasks WHERE capture_id=?').all(c.id)) worker.cancel(t.id);
-    db.prepare('DELETE FROM captures WHERE id=?').run(c.id); await unlink(path.join(dataDir, c.path)).catch(() => {}); res.json({ ok: true });
+    db.transaction(() => {
+      const tasks = db.prepare('SELECT DISTINCT t.id FROM tasks t LEFT JOIN task_captures tc ON tc.task_id=t.id WHERE t.capture_id=? OR tc.capture_id=?').all(c.id, c.id);
+      for (const t of tasks) { worker.cancel(t.id); db.prepare('DELETE FROM tasks WHERE id=?').run(t.id); }
+      db.prepare('DELETE FROM captures WHERE id=?').run(c.id);
+    })();
+    await unlink(path.join(dataDir, c.path)).catch(() => {}); res.json({ ok: true });
   }));
   protectedRouter.post('/captures/:id/analyze', (req, res) => { const c = owned('captures', req.params.id, req.identity.userId); const task = createTask(req.identity.userId, c.id, req.body); realtime.publish(req.identity.userId, { type: 'task.updated', task }); res.status(201).json({ task }); });
   protectedRouter.get('/tasks', (req, res) => res.json({ tasks: db.prepare('SELECT * FROM tasks WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit(req)).map(taskView) }));
@@ -347,6 +432,7 @@ export async function createApp(options = {}) {
     const task = owned('tasks', req.params.id, req.identity.userId);
     if (!['failed', 'cancelled'].includes(task.status)) fail(409, '只有失败或取消的任务可以重试');
     await worker.waitFor(task.id);
+    liveIdentity(req);
     // Retrying keeps the original prompt snapshot and sources.
     db.transaction(() => {
       const current = owned('tasks', task.id, req.identity.userId);

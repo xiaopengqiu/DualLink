@@ -101,3 +101,26 @@ test('normal ICE arriving before its offer is bounded and applied after the offe
   assert.ok(connections[0].addedIce.length > 0 && connections[0].addedIce.length <= 100, 'preserve useful early ICE within a strict queue bound');
   assert.equal(connections[0].addedIce[0].candidate, 'early-ice-0');
 });
+
+test('direct screenshots upload without analysis and acknowledge their cloud ID including duplicate transfer',async t=>{
+  const {send,connections,makeChannel}=await createHarness(t);
+  const uploads=[];
+  t.mock.method(globalThis,'fetch',async(_url,options)=>{
+    uploads.push(options.body);
+    return new Response(JSON.stringify({capture:{id:'cloud-capture',captureId:'8d083586-0631-4c5e-91a8-b84c994312cc'},task:null}));
+  });
+  send({type:'signal',fromPeerId:'pc-peer',payload:{kind:'offer',sdp:'offer'}});await flush();
+  const channel=makeChannel(),acks=[];channel.send=data=>acks.push(JSON.parse(data));
+  connections[0].ondatachannel({channel});channel.readyState='open';channel.onopen?.();
+  const transfer=()=>{
+    channel.onmessage({data:JSON.stringify({type:'capture.start',captureId:'8d083586-0631-4c5e-91a8-b84c994312cc',name:'screen.png',mime:'image/png',size:4,deviceId:'pc-1',analyze:true})});
+    channel.onmessage({data:new Uint8Array([1,2,3,4]).buffer});
+    channel.onmessage({data:JSON.stringify({type:'capture.end',captureId:'8d083586-0631-4c5e-91a8-b84c994312cc'})});
+  };
+  transfer();await flush();await flush();
+  assert.equal(uploads[0].get('analyze'),'false');
+  assert.equal(acks[0].cloudCaptureId,'cloud-capture');
+  transfer();await flush();
+  assert.equal(uploads.length,1);
+  assert.equal(acks[1].cloudCaptureId,'cloud-capture');
+});

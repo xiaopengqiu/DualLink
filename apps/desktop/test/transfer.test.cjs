@@ -23,3 +23,9 @@ test('RTC sender ignores an acknowledgement received before transfer end',async(
   const channel={readyState:'open',bufferedAmount:0,send(frame){if(typeof frame==='string'&&JSON.parse(frame).type==='capture.start'){for(const fn of listeners)fn({data:JSON.stringify({type:'capture.ack',captureId:'early'})});}},addEventListener(name,fn){if(name==='message')listeners.add(fn);},removeEventListener(name,fn){if(name==='message')listeners.delete(fn);}};
   await assert.rejects(sendCapture(channel,{captureId:'early'},new Uint8Array(1),{ackTimeoutMs:15}),/确认/);
 });
+
+test('RTC sender returns the cloud capture ID so a submitted question can use every direct image',async()=>{
+ const {sendCapture}=require('../renderer/transfer.js'),listeners=new Set();
+ const channel={readyState:'open',bufferedAmount:0,send(frame){if(typeof frame==='string'&&JSON.parse(frame).type==='capture.end')queueMicrotask(()=>{for(const fn of listeners)fn({data:JSON.stringify({type:'capture.ack',captureId:'local',cloudCaptureId:'cloud-id'})});});},addEventListener(name,fn){if(name==='message')listeners.add(fn);},removeEventListener(name,fn){if(name==='message')listeners.delete(fn);}};
+ assert.deepEqual(await sendCapture(channel,{captureId:'local'},new Uint8Array(1)),{cloudCaptureId:'cloud-id'});
+});

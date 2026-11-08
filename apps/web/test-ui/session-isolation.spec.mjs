@@ -101,7 +101,7 @@ test('switching accounts clears RTC preview and private workspace drafts and rev
   await expect(page.getByLabel('搜索截图历史')).toHaveValue('');
   await expect(page.getByLabel('截图执行方式')).toHaveValue('codex');
   await expect(page.getByRole('combobox', { name: '回答风格', exact: true })).toHaveValue('prompt-b');
-  await expect(page.getByLabel('接收图片后自动分析')).toBeChecked();
+  await expect(page.getByText('截图不会自动回答。电脑按回答快捷键后，关联截图会统一生成一份答案；网页上传需点击下方回答。')).toBeVisible();
   await expect(page.getByRole('button', { name: '上传截图', exact: true })).toBeEnabled();
   expect(await page.evaluate(url => window.__revokedBlobs.includes(url), previewUrl)).toBe(true);
   await page.getByRole('button', { name: '用户管理', exact: true }).click();
