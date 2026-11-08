@@ -5,10 +5,10 @@
 | 场景或阶段 | 执行方式 | 配置内容 |
 | --- | --- | --- |
 | 截图回答 | Codex CLI / Claude CLI | 分别保存两个 CLI 对应的模型 ID |
-| 语音转文字 | 百炼流式 ASR API | 识别模型 ID |
+| 语音转文字 | 百炼 Token Plan HTTP 分段 / 流式 ASR API | 识别模型 ID |
 | 基于转写文字回答 | Codex CLI / Claude CLI / 百炼文本 API | 分别保存每种执行方式的文字模型 ID |
 | 直接音频回答 | 百炼 Qwen-Omni API | 音频模型 ID、问题回看范围 |
-| 直接音频的后台文字留档 | 百炼流式 ASR API | 识别模型 ID、后台转写开关 |
+| 直接音频的后台文字留档 | 百炼 Token Plan HTTP 分段 / 流式 ASR API | 识别模型 ID、后台转写开关 |
 
 Codex / Claude 是执行工具的名称，不代表实际模型。Claude 接入百炼兼容接口时，应填写该接口支持的百炼模型 ID，而不是照抄 Anthropic 模型名称。Codex 的模型 ID 也取决于它在服务器实际连接的供应商。
 
@@ -20,9 +20,13 @@ Codex / Claude 是执行工具的名称，不代表实际模型。Claude 接入�
 
 例如，截图阶段可以使用自己已开通、支持图片输入的高质量模型；转写后的文字回答可以使用同一接口支持的 Flash 模型。直接音频阶段必须选择支持当前 Qwen-Omni Realtime 协议的模型，不能把纯文本 Flash 模型填入音频字段。
 
-语音转文字模型也必须支持当前接入的百炼 inference 流式识别协议。模型 ID 输入框允许自定义名称，不表示任意模型或接口协议都可以运行；供应商仍会检查模型可用性、权限和额度。若服务器设置了模型允许列表，只能选择列表中的模型。
+语音识别方式可以在管理员账号设置中选择「自动」「Token Plan · HTTP 分段识别」或「实时识别 · WebSocket」。自动模式会根据非实时模型名或 Token Plan Key 选择 HTTP；普通流式模型继续使用 WebSocket。Token Plan 使用 `qwen-audio-3.0-asr-flash`，无需业务空间 ID。HTTP 分段默认最长 4 秒，允许 2–15 秒，短暂停顿会提前提交，纯静音不会发送模型请求。模型 ID 输入框允许自定义名称，不表示任意模型或接口协议都可以运行；供应商仍会检查模型可用性、权限和额度。若服务器设置了模型允许列表，只能选择列表中的模型。
 
-Claude 可选择标准 API Key（`x-api-key`）或兼容供应商的 Bearer Token（`Authorization`）认证。使用百炼等兼容接口时，根据供应商的 Claude 接入方式选择 Bearer Token。语音接口地址可留空自动生成；自定义时填写完整 HTTPS 地址，包含 `/api-ws/v1/inference` 或 `/api-ws/v1/realtime` 路径，服务器会使用 WSS 连接。
+Token Plan 的语音识别接口可填 `https://token-plan.cn-beijing.maas.aliyuncs.com`，也可留空自动生成。历史上填写的 `/compatible-mode/v1` 会在 HTTP 分段模式下自动改用 `/api/v1/services/aigc/multimodal-generation/generation`。音频用 WAV Base64 直接提交，不需要公开音频 URL。每路录音独立排队、按顺序保存字幕；短暂的网络异常、429 或 5xx 最多重试一次，积压或识别失败会明确记录缺口，并保留已接收录音用于补传。
+
+点击「回答当前问题」或按客户端回答快捷键会先提交当前尾段，再使用识别文字生成答案；暂停、结束和正常断线也会尝试保存尾段。分段识别的字幕有片段采集时间和接口处理延迟，不能视为逐字实时转写。
+
+Claude 可选择标准 API Key（`x-api-key`）或兼容供应商的 Bearer Token（`Authorization`）认证。使用百炼等兼容接口时，根据供应商的 Claude 接入方式选择 Bearer Token。语音接口地址可留空自动生成；普通 WebSocket 模式自定义时填写完整 HTTPS 地址，包含 `/api-ws/v1/inference` 或 `/api-ws/v1/realtime` 路径，服务器会使用 WSS 连接；Token Plan 分段识别使用上述 HTTP 接口。
 
 ### 密钥保存与生效范围
 

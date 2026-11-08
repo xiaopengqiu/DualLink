@@ -5,7 +5,7 @@ import { fail } from './auth.mjs';
 import { modelId } from './model-settings.mjs';
 
 export const profileNames = ['screenshot.codex','screenshot.claude','transcript.codex','transcript.claude','transcript.bailian','asr','omni'];
-const fields = ['apiKey','baseUrl','model','workspaceId','region','authType'];
+const fields = ['apiKey','baseUrl','model','workspaceId','region','authType','transport','chunkSeconds'];
 export function createAiSettings({db,dataDir}) {
   db.exec('CREATE TABLE IF NOT EXISTS service_ai(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)');
   const keyPath=path.join(dataDir,'.ai-settings.key');
@@ -25,6 +25,9 @@ export function createAiSettings({db,dataDir}) {
         if(typeof value!=='string'||value.length>(field==='apiKey'?4096:500)||/[\x00-\x1f\x7f]/.test(value))fail(400,'模型配置内容无效');
         const v=value.trim();
         if(field==='model')modelId(v);
+        if(field==='transport'&&v&&!['auto','token-plan','websocket'].includes(v))fail(400,'语音识别方式无效');
+        if(field==='chunkSeconds'&&v&&(!/^\d+$/.test(v)||Number(v)<2||Number(v)>15))fail(400,'语音分段时长需为2至15秒');
+        if(['transport','chunkSeconds'].includes(field)&&name!=='asr')fail(400,'仅语音识别支持分段设置');
         if(field==='authType'&&v&&!['api-key','bearer'].includes(v))fail(400,'认证方式无效');
         if(field==='baseUrl'&&v){let u;try{u=new URL(v);}catch{fail(400,'接口地址无效');}if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash)fail(400,'接口地址需为 HTTPS，不能包含密钥、查询参数或片段');}
         if(field==='workspaceId'&&v&&!/^[A-Za-z0-9_-]{1,100}$/.test(v))fail(400,'业务空间 ID 无效');
@@ -50,7 +53,8 @@ export function createAiSettings({db,dataDir}) {
   function api(name,base={}){
     const p=profile(name),result={...base};
     for(const field of ['apiKey','workspaceId','region','model'])if(p[field])result[field]=p[field];
-    if(p.baseUrl){if(name==='transcript.bailian')result.textBaseUrl=p.baseUrl;else result.wsUrl=p.baseUrl.replace(/^https:/,'wss:');}
+    if(name==='asr'){if(p.transport)result.transport=p.transport;if(p.chunkSeconds)result.chunkSeconds=Number(p.chunkSeconds);}
+    if(p.baseUrl){if(name==='asr')result.baseUrl=p.baseUrl;else if(name==='transcript.bailian')result.textBaseUrl=p.baseUrl;else result.wsUrl=p.baseUrl.replace(/^https:/,'wss:');}
     if(name==='transcript.bailian')for(const [field,target] of Object.entries({apiKey:'textApiKey',workspaceId:'textWorkspaceId',region:'textRegion',model:'textModel'}))if(p[field])result[target]=p[field];
     return result;
   }

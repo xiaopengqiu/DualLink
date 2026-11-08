@@ -369,3 +369,19 @@ test('pending transcript trigger rejects a mode switch instead of dispatching mi
  const pending=s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId:randomUUID()});await new Promise(r=>setTimeout(r,60));await s.api(`/interviews/${session.id}/pause`,a,'POST',{});assert.equal((await s.api(`/interviews/${session.id}`,a,'PATCH',{mode:'audio',transcribe:false})).status,200);
  assert.equal((await pending).status,409);assert.equal(calls.length,0);assert.equal(s.db.prepare('SELECT count(*) AS n FROM interview_questions').get().n,0);
 });
+
+test('HTTP ASR recording remains client-compatible, flushes on trigger and drains both tracks at pause',async t=>{
+  const {createServer}=await import('node:http');let requests=0;
+  const upstream=createServer(async(req,res)=>{let body='';for await(const data of req)body+=data;const input=JSON.parse(body);assert.equal(input.model,'qwen-audio-3.0-asr-flash');assert(input.input.messages[0].content[0].input_audio.data.startsWith('data:audio/wav;base64,'));requests++;res.setHeader('content-type','application/json');res.end(JSON.stringify({output:{text:requests===1?'请解释 Redis 缓存。':'本人经历。'}}));});
+  await new Promise(r=>upstream.listen(0,'127.0.0.1',r));t.after(async()=>{upstream.closeAllConnections();await new Promise(r=>upstream.close(r));});
+  const calls=[];const s=await setup(t,{asrFactory:undefined,asr:{transport:'token-plan',apiKey:'fixture-only',model:'qwen-audio-3.0-asr-flash',httpUrl:`http://127.0.0.1:${upstream.address().port}/asr`},textRunner:async input=>{calls.push(input);return {answer:'参考回答'};}});
+  const a=await s.login(),device=await s.pair(a),session=await s.create(device,{autoAnswer:false});
+  const config=await(await s.api('/interviews/config',a)).json();assert.equal(config.configured,true);assert.equal(config.asrTransport,'http');
+  const {socket}=await s.audio(session,device);
+  const voiced=(track,seq,start)=>{const b=frame(track,seq,start);for(let i=16;i<b.length;i+=2)b.writeInt16LE(1000,i);return b;};
+  let ack=next(socket,'audio.ack');socket.send(voiced(0,0,0));await ack;assert.equal(requests,0);
+  const trigger=await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:randomUUID()});assert.equal(trigger.status,201);const result=await trigger.json();assert.match(result.question.text,/Redis/);await waitFor(()=>calls.length);assert.match(calls[0].prompt,/Redis/);
+  ack=next(socket,'audio.ack');socket.send(voiced(1,0,1000));await ack;
+  const pause=await s.api(`/interviews/${session.id}/pause`,a,'POST',{});assert.equal(pause.status,200);
+  const detail=await(await s.api(`/interviews/${session.id}`,a)).json();assert.equal(requests,2);assert(detail.segments.some(x=>x.track==='remote'&&x.text.includes('Redis')&&x.startMs===0));assert(detail.segments.some(x=>x.track==='self'&&x.text==='本人经历。'&&x.startMs===1000));assert.equal(detail.gaps.length,0);
+});

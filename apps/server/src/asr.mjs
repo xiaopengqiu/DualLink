@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
+import { createHttpAsrFactory } from './asr-http.mjs';
 
 export class AsrError extends Error {
   constructor(code, message) { super(message); this.name = 'AsrError'; this.code = code; }
@@ -8,16 +9,25 @@ export function asrConfiguration(options = {}) {
   const apiKey = options.apiKey ?? process.env.DASHSCOPE_API_KEY ?? '';
   const workspaceId = options.workspaceId ?? process.env.DASHSCOPE_WORKSPACE_ID ?? '';
   const region = options.region || process.env.ASR_REGION || 'cn-beijing';
-  const model = options.model || process.env.ASR_MODEL || 'qwen-audio-3.1-asr-flash-streaming';
-  const wsUrl = options.wsUrl || process.env.ASR_WS_URL || (workspaceId && /^[A-Za-z0-9_-]{1,100}$/.test(workspaceId) && /^[a-z0-9-]{2,40}$/.test(region) ? `wss://${workspaceId}.${region}.maas.aliyuncs.com/api-ws/v1/inference` : '');
-  return { ...options, apiKey, workspaceId, region, model, wsUrl, configured: !!apiKey && !!wsUrl };
+  const requested = options.transport || process.env.ASR_TRANSPORT || 'auto';
+  const tokenPlan = requested === 'token-plan' || apiKey.startsWith('sk-sp-');
+  const model = options.model || (tokenPlan ? 'qwen-audio-3.0-asr-flash' : process.env.ASR_MODEL || 'qwen-audio-3.1-asr-flash-streaming');
+  const transport = requested === 'token-plan' || (requested === 'auto' && (tokenPlan || /^qwen-audio-\d+\.\d+-asr-flash$/.test(model))) ? 'http' : 'websocket';
+  const wsUrl = options.wsUrl || options.baseUrl?.replace(/^https:/,'wss:') || process.env.ASR_WS_URL || (workspaceId && /^[A-Za-z0-9_-]{1,100}$/.test(workspaceId) && /^[a-z0-9-]{2,40}$/.test(region) ? `wss://${workspaceId}.${region}.maas.aliyuncs.com/api-ws/v1/inference` : '');
+  let httpUrl = options.httpUrl || options.baseUrl || process.env.ASR_HTTP_URL || (tokenPlan ? 'https://token-plan.cn-beijing.maas.aliyuncs.com' : workspaceId ? `https://${workspaceId}.${region}.maas.aliyuncs.com` : '');
+  if (httpUrl) {
+    try { const url = new URL(httpUrl); if (['/', '/compatible-mode/v1', '/compatible-mode/v1/', '/v1', '/v1/'].includes(url.pathname)) url.pathname = '/api/v1/services/aigc/multimodal-generation/generation'; httpUrl = url.toString(); } catch { /* The factory reports the invalid URL without exposing credentials. */ }
+  }
+  return { ...options, chunkSeconds: Math.max(2,Math.min(15,Number(options.chunkSeconds||process.env.ASR_CHUNK_SECONDS)||4)), apiKey, workspaceId, region, model, transport, tokenPlan, wsUrl, httpUrl, configured: !!apiKey && !!(transport === 'http' ? httpUrl : wsUrl) };
 }
 
 /** Each call owns one independent remote/self ASR task. Credentials never cross client APIs. */
 export function createDashScopeAsrFactory(options = {}) {
   const config = asrConfiguration(options);
+  if(config.transport==='http')return createHttpAsrFactory(config);
   return async function start({ track, model = config.model, onResult = () => {}, onError = () => {}, onStatus = () => {}, hotwords = [], context = [] } = {}) {
     if (!config.configured) throw new AsrError('ASR_NOT_CONFIGURED', '尚未配置实时语音识别，请管理员设置百炼 API Key、业务空间和地域');
+    if(/^qwen-audio-\d+\.\d+-asr-flash$/.test(model))throw new AsrError('ASR_INVALID_CONFIG','该模型使用 HTTP 分段识别，请管理员将识别方式设为自动或 Token Plan');
     const url = new URL(config.wsUrl);
     if (url.protocol !== 'wss:' && !(url.protocol === 'ws:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))) throw new AsrError('ASR_INVALID_CONFIG', '语音识别接口必须使用安全 WebSocket 地址');
     if (!['remote', 'self'].includes(track)) throw new AsrError('ASR_INVALID_TRACK', '未知音频轨道');

@@ -271,7 +271,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   // Surviving recordings cannot truthfully remain "recording" after a restart.
   for (const old of db.prepare("SELECT * FROM interviews WHERE status='recording'").all()) { db.prepare("UPDATE interviews SET status='paused',recording_status='interrupted',error='服务器已重启，请恢复录音并补传本地缓存',updated_at=? WHERE id=?").run(now(), old.id); gap(old.id, null, null, null, '服务器重启造成录音中断'); }
   const prepare = interview => { if (interview.mode==='transcript' && textRunner.prepareSession && interview.status === 'recording') void Promise.resolve(textRunner.prepareSession({ userId: interview.user_id, sessionId: interview.id,provider:interview.provider,model:parse(interview.text_models,{})[interview.provider]||defaultTextModel(interview.provider,cli)||undefined })).catch(() => { /* A model failure never masquerades as an ASR recording failure. */ }); };
-  router.get('/config', (req, res) => res.json({ configured:hasAsr(), model: asrConfig.model,asrModel:asrConfig.model,asrModels,customAsrModelsAllowed,customAudioModelsAllowed, region: asrConfig.region, sampleRate: 16000, maxSessionMinutes,maxDailyMinutes, rawAudioRetentionDays: retentionDays,audioConfigured:hasAudio(),audioModels,defaults:defaults(req.identity.userId), autoAnswerAvailable: true, providers: ['codex','claude', ...(accountAi?.profile('transcript.bailian').apiKey || process.env.INTERVIEW_TEXT_API_KEY || process.env.DASHSCOPE_API_KEY || asrConfig.apiKey || !lazyRunner ? ['bailian'] : [])], defaultProvider }));
+  router.get('/config', (req, res) => res.json({ asrTransport:effectiveAsr().transport,asrChunkSeconds:Number(effectiveAsr().chunkSeconds)||4, configured:hasAsr(), model: asrConfig.model,asrModel:asrConfig.model,asrModels,customAsrModelsAllowed,customAudioModelsAllowed, region: asrConfig.region, sampleRate: 16000, maxSessionMinutes,maxDailyMinutes, rawAudioRetentionDays: retentionDays,audioConfigured:hasAudio(),audioModels,defaults:defaults(req.identity.userId), autoAnswerAvailable: true, providers: ['codex','claude', ...(accountAi?.profile('transcript.bailian').apiKey || process.env.INTERVIEW_TEXT_API_KEY || process.env.DASHSCOPE_API_KEY || asrConfig.apiKey || !lazyRunner ? ['bailian'] : [])], defaultProvider }));
   router.get('/preferences',(req,res)=>res.json({preferences:defaults(req.identity.userId)}));
   router.patch('/preferences',(req,res)=>{if(req.identity.kind!=='web'||req.identity.role!=='admin')fail(403,'仅管理员可配置模型默认设置');const value=validateSettings(req.body,defaults(req.identity.userId));accountAi?.save({...Object.fromEntries(Object.entries(value.textModels).map(([provider,model])=>['transcript.'+provider,{model}])),asr:{model:value.asrModel},omni:{model:value.audioModel}});db.prepare('INSERT INTO interview_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(accountAi?.owner() || req.identity.userId,JSON.stringify(value));res.json({preferences:value});});
   router.get('/', (req, res) => { const limit = Math.max(1,Math.min(200,parseInt(req.query.limit,10)||50)); res.json({ interviews: db.prepare('SELECT * FROM interviews WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit).map(interviewView) }); });
@@ -388,6 +388,13 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       const time=value=>`${Math.floor(value/60000).toString().padStart(2,'0')}:${Math.floor(value/1000%60).toString().padStart(2,'0')}`;
       questionText=`音频提问 ${time(rangeStart)}–${time(rangeEnd)}`;
     }else{
+      if(effectiveAsr().transport==='http') {
+        let timer;
+        try { await Promise.race([audio.flushSession(sessionId),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Object.assign(new Error('分段语音仍在识别，请稍后再次触发回答'),{status:409})),12000);})]); }
+        finally {clearTimeout(timer);}
+        const current=getSession(sessionId);revalidateTriggerIdentity(req,current);
+        if(!current||current.config_version!==configVersion)fail(409,'回答模式或配置已变化，请重新触发');
+      }
       const deadline=Date.now()+boundedNumber(options.triggerTranscriptWaitMs,1200,20,2000);
       const latestVoice=db.prepare("SELECT max(start_ms+sample_count/16) AS end FROM interview_audio_frames WHERE session_id=? AND track='remote' AND replay=0 AND active=1").get(sessionId).end;
       const waitingForAudio=latestVoice!==null&&latestVoice>(last?.capture_end_ms??last?.audio_end_ms??-1);

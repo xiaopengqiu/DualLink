@@ -191,6 +191,13 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
     db.prepare('DELETE FROM interview_audio_tickets WHERE expires_at<?').run(now());
   }, 15000); heartbeat.unref();
   return {
+    async flushSession(sessionId) {
+      // Snapshot accepted frames before flushing; new frames continue to be archived normally.
+      await Promise.all([...connections.values()].filter(c => c.sessionId === sessionId && c.mode === 'live' && !c.stopping).map(async c => {
+        await c.chain;
+        await Promise.all([...c.tasks.values()].map(task => task.flush?.()));
+      }));
+    },
     async stopSession(sessionId, { drain = true, reason = '' } = {}) { await Promise.all([...connections.values()].filter(c => c.sessionId === sessionId).map(c => finalize(c, drain, reason))); },
     revokeDevice(deviceId) { for (const c of connections.values()) if (c.deviceId === deviceId) { c.ws.terminate(); void finalize(c, false, '设备配对已撤销，录音已停止').catch(() => {}); } },
     revokeUser(userId) { for (const c of connections.values()) if (c.userId === userId) { c.ws.terminate(); void finalize(c, false, '账号不可用，录音已停止').catch(() => {}); } },
