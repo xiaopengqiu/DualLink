@@ -2,6 +2,8 @@ name: Build and publish Windows release
 
 on:
   push:
+    branches:
+      - 'release-publish-*'
     tags:
       - 'v*'
   workflow_dispatch:
@@ -20,6 +22,7 @@ concurrency:
 
 jobs:
   release:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 35
     permissions:
@@ -52,35 +55,27 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          $version = (Get-Content package.json | ConvertFrom-Json).version
-          $files = @(
-            "release/windows/DualLink-$version-x64-setup.exe",
-            "release/windows/DualLink-$version-x64-portable.exe",
-            "release/DualLink-source-$version.zip",
-            "release/DualLink-web-$version.zip",
-            "release/SHA256SUMS-$version.txt"
-          )
-          $existing = gh release view $env:RELEASE_TAG --json isDraft 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            if (-not ($existing | ConvertFrom-Json).isDraft) { throw "Release is already published; refusing to replace it" }
-            gh release upload $env:RELEASE_TAG @files --clobber
-          } else {
-            gh release create $env:RELEASE_TAG @files --draft --verify-tag --title "DualLink $env:RELEASE_TAG" --generate-notes
-          }
-          if ($LASTEXITCODE -ne 0) { throw "Release upload failed" }
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw "Cannot verify uploaded release" }
-          foreach ($file in $files) {
-            $local = Get-Item $file
-            $asset = @($release.assets | Where-Object name -eq $local.Name)
-            if ($asset.Count -ne 1 -or $asset[0].size -ne $local.Length) { throw "Uploaded asset mismatch: $file" }
-          }
-          gh release edit $env:RELEASE_TAG --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }
+        run: ./.github/scripts/publish-release.ps1 -Tag $env:RELEASE_TAG
       - name: Remove local build products after successful publication
         if: success()
         shell: pwsh
         run: |
           Remove-Item release, .local -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item node_modules/electron -Recurse -Force -ErrorAction SilentlyContinue
+
+  publish-existing:
+    if: startsWith(github.ref, 'refs/heads/release-publish-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify and publish the existing draft without rebuilding
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME -replace '^release-publish-', ''
+          ./.github/scripts/publish-release.ps1 -Tag $tag -PublishExistingOnly
