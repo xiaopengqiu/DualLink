@@ -63,6 +63,13 @@ test('manual answer shortcut has a default and cannot conflict with either scree
  assert.throws(()=>validateSettings({fullShortcut:'Control+Alt+Enter'}),/快捷键/);
 });
 
+test('startup update checking defaults on for old settings and accepts only a boolean',()=>{
+ const {validateSettings}=require('../lib/core.cjs');
+ assert.equal(validateSettings({}).autoCheckUpdates,true);
+ assert.equal(validateSettings({autoCheckUpdates:false}).autoCheckUpdates,false);
+ assert.throws(()=>validateSettings({autoCheckUpdates:'true'}));
+});
+
 test('screenshot selection follows account configuration while explicit local overrides stay separate',()=>{
  const {validateSettings,screenshotSelection}=require('../lib/core.cjs');
  const account={provider:'claude',models:{codex:'slow-codex',claude:'quality-qwen'}};

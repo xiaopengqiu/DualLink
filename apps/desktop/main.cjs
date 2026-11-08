@@ -10,18 +10,25 @@ const QRCode=require('qrcode');
 const {DEFAULT_SETTINGS,normalizeCloudUrl,validateSettings,cropRect,screenshotSelection}=require('./lib/core.cjs');
 const {CaptureQueue}=require('./lib/queue.cjs');
 const {AudioController}=require('./lib/audio-main.cjs');
+const {UpdateController}=require('./lib/updater.cjs');
+const {prepareUpdateInstall}=require('./lib/update-install.cjs');
+const {updateBlockReason}=require('./lib/update-policy.cjs');
 
 const testMode=process.env.DUALLINK_TEST_MODE==='1';
 if(process.env.DUALLINK_TEST_USER_DATA)app.setPath('userData',path.resolve(process.env.DUALLINK_TEST_USER_DATA));
 if(!app.requestSingleInstanceLock())app.quit();
 let win,tray,overlay,queue,credential=null,pendingPair=null,settings={...DEFAULT_SETTINGS,deviceName:os.hostname()};
 let quitting=false,capturing=false,uploading=false,socket,reconnectTimer,pairTimer,generation=0,reconnectAttempts=0;
-let lastImage=null,recent=[],peerCount=0,audioController,audioPermissionUntil=0;
+let lastImage=null,recent=[],peerCount=0,audioController,audioPermissionUntil=0,updater,updateTimer,activeActions=0;
 const directWaiters=new Map(),lanAttempted=new Set();
 const state={connected:false,connecting:false,error:'',secureStorage:false,pairing:null,user:null,device:null,queue:[],lastCapture:null,shortcutsError:''};
 const configPath=()=>path.join(app.getPath('userData'),'settings.json');
 const emit=(channel,data)=>{if(win&&!win.isDestroyed())win.webContents.send(channel,data);};
-function snapshot(){return {...state,settings,paired:!!credential,queue:queue?.items.map(({captureId,createdAt,attempts,error,name,size,analyze})=>({captureId,createdAt,attempts,error,name,size,analyze}))||[],recent,peerCount,audio:audioController?.view()||{phase:'idle',interview:null,recording:false,recoveries:[]},displays:screen.getAllDisplays().map(d=>({id:String(d.id),name:d.label||`显示器 ${d.id}`,width:Math.round(d.bounds.width*d.scaleFactor),height:Math.round(d.bounds.height*d.scaleFactor),scaleFactor:d.scaleFactor}))};}
+function updateView(){return {...(updater?.view()||{phase:'idle',currentVersion:app.getVersion(),kind:process.env.PORTABLE_EXECUTABLE_FILE?'portable':'installed'}),supported:process.platform==='win32'&&app.isPackaged};}
+function updateBusyReason(){return updateBlockReason({capturing,uploading,activeActions,queueLength:queue?.items.length||0,audio:audioController?.view()||{}});}
+function assertNotInstalling(){if(updater?.view().phase==='installing')throw new Error('正在安装更新，请等待客户端重启');}
+function assertUpdateSupported(){if(!updateView().supported)throw new Error('请使用已打包的 Windows 客户端进行升级');}
+function snapshot(){return {...state,settings,paired:!!credential,update:updateView(),queue:queue?.items.map(({captureId,createdAt,attempts,error,name,size,analyze})=>({captureId,createdAt,attempts,error,name,size,analyze}))||[],recent,peerCount,audio:audioController?.view()||{phase:'idle',interview:null,recording:false,recoveries:[]},displays:screen.getAllDisplays().map(d=>({id:String(d.id),name:d.label||`显示器 ${d.id}`,width:Math.round(d.bounds.width*d.scaleFactor),height:Math.round(d.bounds.height*d.scaleFactor),scaleFactor:d.scaleFactor}))};}
 function changed(){emit('state',snapshot());updateTray();}
 function message(error){state.error=error instanceof Error?error.message:String(error);changed();}
 function encryptedStorageAvailable(){return safeStorage.isEncryptionAvailable()&&(process.platform!=='linux'||safeStorage.getSelectedStorageBackend()!=='basic_text');}
@@ -99,6 +106,7 @@ async function connect(){
   }catch(e){if(ownGeneration!==generation)return;if(e.status===401||e.status===403)await revoked();else{state.error=e.message;scheduleReconnect();}}
 }
 async function beginPairing(input){
+  assertNotInstalling();
   if(credential)throw new Error('请先解除当前配对');settings=validateSettings({...settings,cloudUrl:input.cloudUrl,deviceName:input.deviceName});await queue.clear();await persist();clearTimeout(pairTimer);
   const secret=crypto.randomBytes(32).toString('hex');const result=await api('/pairings',{method:'POST',body:{name:settings.deviceName,deviceSecret:secret},secret});
   const link=new URL(settings.cloudUrl);link.searchParams.set('pair',result.code);
@@ -116,11 +124,13 @@ async function pollPairing(){
   pairTimer=setTimeout(pollPairing,1800);
 }
 async function saveSettings(input){
+  assertNotInstalling();
   const next=validateSettings({...settings,...input});
   if(credential&&next.cloudUrl!==settings.cloudUrl)throw new Error('切换服务器前请先解除当前配对');
   settings=next;await persist();bindShortcuts();if(!testMode)app.setLoginItemSettings({openAtLogin:settings.autoStart,path:process.env.PORTABLE_EXECUTABLE_FILE||app.getPath('exe')});changed();return snapshot();
 }
 async function unpair(){
+  assertNotInstalling();
   audioPermissionUntil=0;await audioController?.reset({removeLocal:true});
   if(credential)await api('/device/me',{method:'DELETE',timeout:4000}).catch(()=>{});
   clearTimeout(pairTimer);pendingPair=null;disconnect();credential=null;state.pairing=null;state.device=null;state.user=null;state.screenshotPreferences=null;lastImage=null;recent=[];state.lastCapture=null;await queue.clear();await persist();state.error='';changed();return snapshot();
@@ -141,6 +151,7 @@ function chooseRegion(image,display){
   });
 }
 async function capture(mode){
+  assertNotInstalling();
   if(!credential)throw new Error('请先完成设备配对');if(capturing)return;capturing=true;const restore=win?.isVisible();
   const captureOwner=credential;
   try{
@@ -166,7 +177,7 @@ async function tryDirect(job,bytes){
   });
 }
 async function processQueue(){
-  if(uploading||!credential||quitting)return;uploading=true;
+  if(uploading||!credential||quitting||updater?.view().phase==='installing')return;uploading=true;
   try{
     for(const job of [...queue.items]){
       if(!credential||job.deviceId!==credential.deviceId)continue;if(job.nextAttemptAt>Date.now())continue;
@@ -186,8 +197,20 @@ async function processQueue(){
   }finally{uploading=false;changed();}
 }
 function registerIpc(){
-  const handle=(channel,fn)=>ipcMain.handle(channel,async(event,...args)=>{trustedWindow(event);return fn(...args);});
+  const mutations=new Set(['save-settings','start-pairing','unpair','capture','retry-uploads','reconnect','audio-refresh','audio-start','audio-resume','audio-pause','audio-end','audio-recover','audio-discard','audio-export-local']);
+  const handle=(channel,fn)=>ipcMain.handle(channel,async(event,...args)=>{trustedWindow(event);if(!mutations.has(channel))return fn(...args);assertNotInstalling();activeActions++;changed();try{return await fn(...args);}finally{activeActions--;changed();}});
   handle('get-state',()=>snapshot());handle('save-settings',saveSettings);handle('start-pairing',beginPairing);handle('unpair',unpair);
+  handle('update-check',async()=>{assertUpdateSupported();await updater.check();return updateView();});
+  handle('update-download',async()=>{assertUpdateSupported();await updater.download();return updateView();});
+  handle('update-install',async()=>{assertUpdateSupported();await updater.install();return updateView();});
+  handle('update-upgrade',async()=>{
+    assertUpdateSupported();
+    if(!['available','downloaded'].includes(updater.view().phase))await updater.check();
+    if(updater.view().phase==='current')return updateView();
+    if(updater.view().phase!=='downloaded')await updater.download();
+    if(!updateBusyReason())await updater.install();
+    return updateView();
+  });
   handle('capture',mode=>{if(!['full','region'].includes(mode))throw new Error('截图模式无效');return capture(mode);});
   handle('retry-uploads',async()=>{for(const item of queue.items)item.nextAttemptAt=0;await processQueue();return snapshot();});
   handle('last-image',()=>lastImage);
@@ -195,17 +218,17 @@ function registerIpc(){
   handle('reconnect',()=>connect());
   handle('audio-status',()=>audioController.view());
   handle('audio-refresh',()=>audioController.refresh());
-  handle('audio-prepare',()=>{if(!credential)throw new Error('请先配对设备');audioPermissionUntil=Date.now()+60000;return {allowed:true};});
+  handle('audio-prepare',()=>{assertNotInstalling();if(!credential)throw new Error('请先配对设备');audioPermissionUntil=Date.now()+60000;return {allowed:true};});
   handle('audio-trigger',()=>audioController.trigger());
   handle('audio-capture-flushed',input=>audioController.markFlushed(input));
-  handle('audio-start',async input=>{audioPermissionUntil=Date.now()+60000;return audioController.start(input||{});});
+  handle('audio-start',async input=>{assertNotInstalling();audioPermissionUntil=Date.now()+60000;return audioController.start(input||{});});
   handle('audio-capture-started',token=>audioController.markStarted(token));
   handle('audio-capture-stopped',token=>audioController.markStopped(token));
   handle('audio-capture-failed',input=>audioController.captureFailed(input||{}));
   handle('audio-pause',async()=>{audioPermissionUntil=0;return audioController.pause();});
-  handle('audio-resume',async input=>{audioPermissionUntil=Date.now()+60000;return audioController.resume(input||{});});
+  handle('audio-resume',async input=>{assertNotInstalling();audioPermissionUntil=Date.now()+60000;return audioController.resume(input||{});});
   handle('audio-end',async()=>{audioPermissionUntil=0;return audioController.end();});
-  handle('audio-recover',id=>audioController.recover(id));
+  handle('audio-recover',id=>{assertNotInstalling();return audioController.recover(id);});
   handle('audio-discard',id=>audioController.discard(id));
   handle('audio-export-local',async id=>{const selection=await dialog.showOpenDialog(win,{title:'选择本机录音恢复文件的导出目录',properties:['openDirectory','createDirectory']});if(selection.canceled)return null;return audioController.exportWav(id,selection.filePaths[0]);});
   ipcMain.on('audio-frame',(event,input)=>{try{trustedWindow(event);void audioController.ingest(input||{}).catch(error=>audioController.fail(error));}catch{}});
@@ -218,6 +241,13 @@ app.on('second-instance',showWindow);
 app.whenReady().then(async()=>{
   app.setAppUserModelId('cn.duallink.client');await load();queue=new CaptureQueue(path.join(app.getPath('userData'),'pending'));await queue.load();
   audioController=new AudioController({root:path.join(app.getPath('userData'),'audio'),getOwner:()=>credential,api:(owner,route,options={})=>api(route,{...options,secret:owner.secret,baseUrl:owner.cloudUrl}),emit:(channel,data)=>channel==='audio.state'?changed():emit(channel,data),onUnauthorized:()=>revoked().catch(message)});
+  const cacheDir=path.join(app.getPath('userData'),'updates');
+  updater=new UpdateController({currentVersion:app.getVersion(),kind:process.env.PORTABLE_EXECUTABLE_FILE?'portable':'installed',cacheDir,getBusyReason:updateBusyReason,onChange:()=>changed(),install:async update=>{
+    await persist();await queue.pending;
+    const blocked=updateBusyReason();if(blocked)throw new Error(blocked);
+    await prepareUpdateInstall({...update,cacheDir,portableExecutable:process.env.PORTABLE_EXECUTABLE_FILE,appPid:process.pid,launcherPath:path.join(process.resourcesPath,'update-launcher.exe')});
+    quitting=true;app.quit();
+  }});
   win=new BrowserWindow({width:1020,height:790,minWidth:820,minHeight:650,title:'双端互联',backgroundColor:'#F4F7F8',icon:path.join(__dirname,'assets','icon.png'),show:false,webPreferences:{preload:path.join(__dirname,'preload.cjs'),nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false}});
   secureWindow(win);win.setMenuBarVisibility(false);win.on('close',event=>{if(!quitting){event.preventDefault();win.hide();}});win.once('ready-to-show',()=>{showWindow();changed();});
   win.webContents.session.setDisplayMediaRequestHandler(async(request,callback)=>{
@@ -227,7 +257,8 @@ app.whenReady().then(async()=>{
   registerIpc();await win.loadFile(path.join(__dirname,'renderer','index.html'));
   tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'assets','icon.png')).resize({width:24,height:24}));tray.on('double-click',showWindow);bindShortcuts();changed();
   if(credential)connect().catch(message);setInterval(()=>processQueue().catch(message),3000).unref();
+  if(!testMode&&settings.autoCheckUpdates&&updateView().supported){updateTimer=setTimeout(()=>updater.check().catch(()=>{}),10000);updateTimer.unref();}
   screen.on('display-added',changed);screen.on('display-removed',changed);
 }).catch(error=>{console.error('启动失败：',error.message);quitting=true;app.quit();});
-app.on('before-quit',()=>{quitting=true;audioPermissionUntil=0;void audioController?.shutdown();disconnect();clearTimeout(pairTimer);globalShortcut.unregisterAll();});
+app.on('before-quit',()=>{quitting=true;audioPermissionUntil=0;clearTimeout(updateTimer);updater?.dispose();void audioController?.shutdown();disconnect();clearTimeout(pairTimer);globalShortcut.unregisterAll();});
 app.on('window-all-closed',()=>{});
