@@ -1,6 +1,6 @@
 {
   "name": "@dual-link/desktop",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "private": true,
   "description": "双端互联 Windows 截图客户端",
   "author": "Dual Link",
@@ -8,7 +8,7 @@
   "scripts": {
     "start": "electron .",
     "prepackage:win": "node ../../scripts/build-update-launcher.mjs",
-    "package:win": "electron-builder --win nsis portable --x64",
+    "package:win": "electron-builder --win nsis portable --x64 --publish never",
     "test": "node --test test/*.test.cjs"
   },
   "dependencies": {
@@ -41,7 +41,6 @@
         "to": "update-launcher.exe"
       }
     ],
-    "electronDist": "../../node_modules/electron/dist",
     "win": {
       "target": [
         "nsis",
