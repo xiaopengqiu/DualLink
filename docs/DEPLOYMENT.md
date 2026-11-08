@@ -19,7 +19,7 @@ docker version
 
 ## 2. 上传源码并安装
 
-上传 `release/DualLink-source-1.5.3.zip`，解压到临时目录，在源码根目录运行：
+上传 `release/DualLink-source-1.6.0.zip`，解压到临时目录，在源码根目录运行：
 
 ```bash
 sudo bash deploy/install.sh assistant.example.com docker
@@ -168,6 +168,8 @@ sudo systemctl start dual-link
 备份包含截图、知识库、账号数据库、面试记录/音频和密钥，必须妥善保管。恢复时停止服务，恢复到相同位置并将数据归属设为 `duallink:duallink` 后再启动。
 
 升级前先备份，停止服务，从新源码执行安装脚本（配置保留），再启动并验收。若更换 AI CLI 版本，修改 `deploy/ai-runner.Dockerfile` 中版本号并重新构建镜像。勿在应用运行中只复制 SQLite 主文件而漏掉 WAL。
+
+1.6.0起已有账号默认启用30天历史清理，启动时及后台定时维护，按数量/附件空间上限控制增长。需要保留更旧资料时，应在升级前备份；原始音频仍有独立保留期限。配置和行为见[历史记录管理](HISTORY_MANAGEMENT.md)。
 
 ## 可选：Docker Compose 个人部署
 

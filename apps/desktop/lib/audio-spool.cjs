@@ -58,9 +58,19 @@ class AudioSpool {
     if(this.byOffset.get(record.offset)?.length!==record.length)throw new Error('录音分块不存在');
     const handle=await fs.open(path.join(this.dir,'frames.bin'),'r');try{const bytes=Buffer.alloc(record.length);const result=await handle.read(bytes,0,bytes.length,record.offset);if(result.bytesRead!==bytes.length)throw new Error('录音缓存不完整');bytes.writeUInt16BE(replay?1:0,2);return bytes;}finally{await handle.close();}
   }
-  status(status){return this.mutate(async()=>{this.meta.status=status;await this.saveMeta();});}
+  status(status){return this.mutate(async()=>{this.meta.status=status;if(status==='ended'&&!this.meta.endedAt)this.meta.endedAt=Date.now();await this.saveMeta();});}
   async remove(){await this.serial;const target=path.resolve(this.dir);if(path.dirname(target)!==this.root)throw new Error('拒绝清理未知录音目录');await fs.rm(target,{recursive:true,force:true});}
   view(){return {id:this.id,title:this.meta.title||'未完成录音',startedAt:this.meta.startedAt,status:this.meta.status,bytes:this.bytes,pending:this.pendingCount,deviceId:this.meta.deviceId};}
   static async list(root,owner){const result=[];for(const entry of await fs.readdir(root,{withFileTypes:true}).catch(e=>{if(e.code==='ENOENT')return [];throw e;})){if(!entry.isDirectory())continue;try{const spool=await AudioSpool.open(root,entry.name,{repairTail:false});if(spool.matchesOwner(owner))result.push(spool);}catch{}}return result.sort((a,b)=>b.meta.startedAt-a.meta.startedAt);}
+  static async cleanup(root,owner,{retentionDays=30,now=Date.now(),isProtected=()=>false,isValid=()=>true}={}){
+    const cutoff=now-Math.max(1,Math.min(365,Number(retentionDays)||30))*86400000,removed=[];
+    for(const spool of await AudioSpool.list(root,owner)){
+      if(!isValid())break;
+      const finishedAt=Number(spool.meta.endedAt||spool.meta.startedAt);
+      if(spool.meta.status!=='ended'||spool.pendingCount||!Number.isFinite(finishedAt)||finishedAt>=cutoff||isProtected(spool.id))continue;
+      await spool.remove();removed.push(spool.id);
+    }
+    return removed;
+  }
 }
 module.exports={AudioSpool};

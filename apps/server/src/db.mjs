@@ -65,5 +65,12 @@ export function openDatabase(dataDir) {
   const modelMigrations = {tasks:{model:'TEXT'}, interviews:{model_overrides:"TEXT NOT NULL DEFAULT '{}'",text_models:"TEXT NOT NULL DEFAULT '{}'",asr_model:"TEXT NOT NULL DEFAULT ''"},interview_answers:{model:'TEXT'}};
   for(const [table,columns] of Object.entries(modelMigrations)){const existing=new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(c=>c.name));for(const [name,type] of Object.entries(columns))if(!existing.has(name))db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);}
   db.exec('CREATE TABLE IF NOT EXISTS model_preferences(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,value TEXT NOT NULL)');
+  if (!db.prepare('PRAGMA table_info(captures)').all().some(c=>c.name==='size')) db.exec('ALTER TABLE captures ADD COLUMN size INTEGER NOT NULL DEFAULT 0');
+  db.exec(`CREATE INDEX IF NOT EXISTS captures_history ON captures(user_id,created_at,id);
+    CREATE TABLE IF NOT EXISTS history_settings(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS history_capture_deletions(user_id TEXT NOT NULL,capture_key TEXT NOT NULL,capture_id TEXT NOT NULL,deleted_at TEXT NOT NULL,PRIMARY KEY(user_id,capture_key));
+    CREATE INDEX IF NOT EXISTS history_deleted_id ON history_capture_deletions(user_id,capture_id);
+    CREATE TABLE IF NOT EXISTS history_file_gc(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,path TEXT NOT NULL,recursive INTEGER NOT NULL DEFAULT 0,bytes INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,error TEXT);
+    CREATE INDEX IF NOT EXISTS history_gc_owner ON history_file_gc(user_id);`);
   return db;
 }

@@ -74,9 +74,9 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     if(body.audioWindowSeconds!==undefined){if(!Number.isInteger(body.audioWindowSeconds)||body.audioWindowSeconds<15||body.audioWindowSeconds>180)fail(400,'音频窗口需为15至180秒');result.audioWindowSeconds=body.audioWindowSeconds;}
     return result;
   };
-  const router = express.Router(), active = new Map(), auto = new Map();
+  const router = express.Router(), active = new Map(), auto = new Map(),deleting=new Set();let historyService=null;
   let closed = false, pumping = false;
-  const own = (id, userId) => { const row = db.prepare('SELECT * FROM interviews WHERE id=? AND user_id=?').get(id, userId); if (!row) fail(404, '面试会话不存在'); return effectiveSession(row); };
+  const own = (id, userId) => { const row = db.prepare('SELECT * FROM interviews WHERE id=? AND user_id=?').get(id, userId); if (!row) fail(404, '面试会话不存在');if(deleting.has(id))fail(410,'面试历史正在删除','HISTORY_DELETED'); return effectiveSession(row); };
   const user = id => db.prepare('SELECT * FROM users WHERE id=?').get(id);
   const interviewView = input => { const row=effectiveSession(input);return ({ id: row.id, title: row.title, status: row.status, provider: row.provider,textModels:modelMap(parse(row.text_models,{})),textModelSources:Object.fromEntries(validProviders.map(p=>[p,parse(row.model_overrides,{}).textModels?.[p]?'本场显式覆盖':defaults(row.user_id).textModels?.[p]?'管理员网页配置':'服务器默认'])),asrModel:row.asr_model||asrConfig.model, promptId: row.prompt_id, promptName: row.prompt_name, autoAnswer: !!row.auto_answer, mode:row.mode,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds,audioAvailable:!!db.prepare('SELECT seq FROM interview_audio_frames WHERE session_id=? AND byte_offset IS NOT NULL LIMIT 1').get(row.id), deviceId: row.device_id, recordingStatus: row.recording_status, error: row.error || null, createdAt: row.created_at, endedAt: row.ended_at, updatedAt: row.updated_at });};
   const segmentView = row => ({ id: row.id, sessionId: row.session_id, track: row.track, segmentId: row.segment_key, text: row.text, startMs: row.start_ms, endMs: row.end_ms, final: !!row.final, revision: row.revision, replay: !!row.replay, createdAt: row.created_at, updatedAt: row.updated_at });
@@ -86,7 +86,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     return { id: row.id, sessionId: row.session_id, questionId: row.question_id, questionRevision: row.question_revision, provider: row.provider,model:row.model||null,mode:row.mode,audioModel:row.audio_model, status: row.status, text: row.text, error: row.error || null, contextSnapshotId: row.context_snapshot_id, usage: parse(row.usage, null), createdAt: row.created_at, updatedAt: row.updated_at,
       sources:context?parse(context.sources):[],contextSummary:context?{id:context.id,summary:context.summary,segmentIds:parse(context.segment_ids),watermark:context.watermark}:null };
   };
-  const getSession = id => effectiveSession(db.prepare('SELECT * FROM interviews WHERE id=?').get(id));
+  const getSession = id => deleting.has(id)?null:effectiveSession(db.prepare('SELECT * FROM interviews WHERE id=?').get(id));
   const event = (sessionId, value) => { const row = getSession(sessionId); if (row) publish(row.user_id, { sessionId, ...value }); };
   const notifyInterview = id => { const row = getSession(id); if (row) event(id, { type: 'interview.updated', interview: interviewView(row) }); };
   const notifyAnswer = id => { const row = db.prepare('SELECT * FROM interview_answers WHERE id=?').get(id); if (row) event(row.session_id, { type: 'interview.answer', answer: answerView(row) }); };
@@ -281,7 +281,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   const hasAsr=()=>!!asrFactory||effectiveAsr().configured;
   const hasAudio=()=>!!audioRunner||effectiveOmni().configured;
   const startAsr=asrFactory||(input=>createDashScopeAsrFactory(accountAi?.api('asr',asr)||asr)(input));
-  const audio = attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory:input=>startAsr({...input,model:getSession(input.sessionId)?.asr_model||asrConfig.model}), recordSegment,onStored:notifyInterview,asrRequested:id=>!!getSession(id)?.transcribe,asrEnabled:id=>{const i=getSession(id);return i&&(i.mode==='transcript'||(i.transcribe&&hasAsr()));},asrRequired:id=>getSession(id)?.mode==='transcript', status: audioStatus, gap, maxSessionMinutes, retentionDays, maxDailyMinutes, maxUserBytes: boundedNumber(options.maxUserAudioBytes ?? process.env.AUDIO_MAX_USER_BYTES, 512*1024*1024, 1024*1024, 2*1024*1024*1024) });
+  const audio = attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory:input=>startAsr({...input,model:getSession(input.sessionId)?.asr_model||asrConfig.model}), recordSegment,onStored:notifyInterview,sessionAvailable:id=>!deleting.has(id),reserveFrame:(uid,bytes)=>historyService?.reserveAudio(uid,bytes),maxUserBytesFor:uid=>historyService?.audioBudget(uid)??Infinity,asrRequested:id=>!!getSession(id)?.transcribe,asrEnabled:id=>{const i=getSession(id);return i&&(i.mode==='transcript'||(i.transcribe&&hasAsr()));},asrRequired:id=>getSession(id)?.mode==='transcript', status: audioStatus, gap, maxSessionMinutes, retentionDays, maxDailyMinutes, maxUserBytes: boundedNumber(options.maxUserAudioBytes ?? process.env.AUDIO_MAX_USER_BYTES, 512*1024*1024, 1024*1024, 2*1024*1024*1024) });
   db.prepare("UPDATE interview_answers SET status=CASE WHEN attempts<3 THEN 'queued' ELSE 'failed' END,lease_until=NULL,updated_at=? WHERE status='running'").run(now());
 
   // Surviving recordings cannot truthfully remain "recording" after a restart.
@@ -291,15 +291,17 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   router.get('/preferences',(req,res)=>res.json({preferences:defaults(req.identity.userId)}));
   router.patch('/preferences',(req,res)=>{if(req.identity.kind!=='web'||req.identity.role!=='admin')fail(403,'仅管理员可配置模型默认设置');const value=validateSettings(req.body,defaults(req.identity.userId));db.transaction(()=>{accountAi?.save({...Object.fromEntries(Object.entries(value.textModels).map(([provider,model])=>['transcript.'+provider,{model}])),asr:{model:value.asrModel},omni:{model:value.audioModel}});db.prepare('INSERT INTO interview_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(accountAi?.owner() || req.identity.userId,JSON.stringify(value));})();res.json({preferences:value});});
   router.get('/', (req, res) => { const limit = Math.max(1,Math.min(200,parseInt(req.query.limit,10)||50)); res.json({ interviews: db.prepare('SELECT * FROM interviews WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit).map(interviewView) }); });
-  router.post('/', (req, res) => {
+  router.post('/', route(async(req, res) => {
     const owner = req.identity.userId, body = req.body;
     const settings=validateSettings(body,defaults(owner),req.identity.role==='admin'&&req.identity.kind==='web');const provider=settings.provider; if (!validProviders.includes(provider)) fail(400, '不支持的面试回答模型');
     if (body.autoAnswer !== undefined && typeof body.autoAnswer !== 'boolean') fail(400, '自动回答设置无效');
     const hotwords = body.hotwords || []; if (!Array.isArray(hotwords) || hotwords.length > 200 || hotwords.some(word => typeof word !== 'string' || !word.trim() || word.length > 80)) fail(400, '热词最多 200 个，每个不超过 80 个字符');
-    let row;
+    let row;const release=await historyService?.reserve(owner,{kind:'interviews',check:()=>revalidateTriggerIdentity(req)});
+    try{
     db.transaction(() => {
+      revalidateTriggerIdentity(req);
       if (db.prepare("SELECT id FROM interviews WHERE user_id=? AND status='recording'").get(owner)) fail(409, '已有正在进行的面试，请先暂停或结束');
-      if (db.prepare('SELECT count(*) AS n FROM interviews WHERE user_id=?').get(owner).n >= 200) fail(429, '面试会话数量已达上限，请导出并删除旧记录');
+      if (!historyService&&db.prepare('SELECT count(*) AS n FROM interviews WHERE user_id=?').get(owner).n >= 200) fail(429, '面试会话数量已达上限，请导出并删除旧记录');
       const prompt = body.promptId ? db.prepare('SELECT * FROM prompts WHERE id=? AND user_id=?').get(body.promptId, owner) : db.prepare('SELECT * FROM prompts WHERE user_id=? ORDER BY is_default DESC,created_at LIMIT 1').get(owner);
       if (body.promptId && !prompt) fail(404, '回答风格不存在');
       const id = randomUUID(), timestamp = now();
@@ -311,7 +313,8 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       row = getSession(id);
     })();
     prepare(row); notifyInterview(row.id); res.status(201).json({ interview: interviewView(row) });
-  });
+    }finally{release?.();}
+  }));
   function detail(row, { full = false, beforeStartMs, cursor } = {}) {
     let segments;
     if (full) segments = db.prepare('SELECT * FROM interview_segments WHERE session_id=? ORDER BY start_ms,rowid').all(row.id);
@@ -356,7 +359,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       const timestamp=now(); db.prepare('UPDATE interviews SET status=?,recording_status=?,updated_at=?,ended_at=? WHERE id=?').run(action === 'end' ? 'ended' : 'paused', action === 'end' ? 'ended' : 'paused', timestamp, action === 'end' ? timestamp : null, row.id);
       if (!db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").get(row.id)){await textRunner.closeSession?.(row.id);if(action==='end'&&retentionDays===0)await audio.removeFiles(row);}
     }
-    notifyInterview(row.id); return getSession(row.id);
+    notifyInterview(row.id);if(action==='end')void historyService?.cleanupUser(row.user_id).catch(()=>{}); return getSession(row.id);
   }
   for (const action of ['pause','resume','end']) router.post(`/:id/${action}`, route(async (req,res) => res.json({ interview: interviewView(await transition(own(req.params.id,req.identity.userId), action)) })));
   router.post('/:id/audio-ticket', (req,res) => {
@@ -502,10 +505,15 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     res.type('text/markdown; charset=utf-8').send(lines.join('\n'));
   });
   router.get('/:id/audio/:track', route(async (req,res) => { const row=own(req.params.id,req.identity.userId);await downloadInterviewAudio({db,dataDir,interview:row,track:req.params.track,res}); }));
-  router.delete('/:id', route(async (req,res) => {
-    const row=own(req.params.id,req.identity.userId);stopAuto(row.id);for(const answer of db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").all(row.id))cancelAnswer(answer.id);
-    await audio.stopSession(row.id,{drain:false});await Promise.all([...active.values()].filter(a=>a.sessionId===row.id).map(a=>a.promise));await textRunner.closeSession?.(row.id);await audio.removeFiles(row);db.prepare('DELETE FROM interviews WHERE id=?').run(row.id);publish(row.user_id,{sessionId:row.id,type:'interview.deleted'});res.json({ok:true});
-  }));
+  async function deleteSession(uid,id,{removeFiles=true,check}={}){
+    const row=own(id,uid);deleting.add(id);stopAuto(id);
+    try{for(const answer of db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").all(id))cancelAnswer(answer.id);
+      await audio.stopSession(id,{drain:false});await Promise.allSettled([triggerChains.get(id),...[...active.values()].filter(a=>a.sessionId===id).map(a=>a.promise)]);await textRunner.closeSession?.(id);check?.();
+      if(removeFiles){await audio.removeFiles(row);db.prepare('DELETE FROM interviews WHERE id=? AND user_id=?').run(id,uid);publish(uid,{sessionId:id,type:'interview.deleted'});deleting.delete(id);}
+      return row;
+    }catch(error){deleting.delete(id);throw error;}
+  }
+  router.delete('/:id', route(async (req,res) => {own(req.params.id,req.identity.userId);if(historyService)await historyService.removeInterview(req.identity.userId,req.params.id,()=>revalidateTriggerIdentity(req));else await deleteSession(req.identity.userId,req.params.id);res.json({ok:true});}));
   const timer=setInterval(()=>void pump().catch(()=>{}),100);timer.unref();
   let maintenanceTask=Promise.resolve();
   async function cleanupAudio(){
@@ -518,7 +526,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     maintenanceTask=maintenanceTask.catch(()=>{}).then(async()=>{for(const row of db.prepare("SELECT * FROM interviews WHERE status='recording' AND created_at<?").all(new Date(Date.now()-maxSessionMinutes*60000).toISOString()))await transition(row,'end');await cleanupAudio();}).catch(()=>{});
   },60000);maintenance.unref();
   function interruptRows(rows,reason){for(const row of rows){stopAuto(row.id);db.prepare("UPDATE interviews SET status='paused',recording_status='interrupted',error=?,updated_at=? WHERE id=? AND status='recording'").run(reason,now(),row.id);for(const answer of db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").all(row.id))cancelAnswer(answer.id);gap(row.id,null,null,null,reason);notifyInterview(row.id);void textRunner.closeSession?.(row.id);}}
-  return {router,recordSegment,flushAuto,pump,configured,cleanupAudio,
+  return {router,recordSegment,flushAuto,pump,configured,cleanupAudio,view:interviewView,rawAudioRetentionDays:retentionDays,deleteSession,releaseDeletion:id=>deleting.delete(id),setHistory:service=>{historyService=service;},
     revokeDevice(deviceId){interruptRows(db.prepare("SELECT * FROM interviews WHERE device_id=? AND status='recording'").all(deviceId),'录音设备配对已撤销');audio.revokeDevice(deviceId);},
     revokeUser(userId){interruptRows(db.prepare("SELECT * FROM interviews WHERE user_id=?").all(userId),'账号不可用，录音已停止');audio.revokeUser(userId);},
     async idle(){await Promise.all([...active.values()].map(a=>a.promise));},

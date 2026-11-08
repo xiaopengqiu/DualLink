@@ -16,6 +16,7 @@ import { attachRealtime } from './realtime.mjs';
 import { createWorker } from './worker.mjs';
 import { diagnose } from './diagnostics.mjs';
 import { createInterviewService } from './interviews.mjs';
+import { createHistoryService } from './history.mjs';
 import { asrConfiguration } from './asr.mjs';
 import { nativeAudioConfiguration } from './native-audio-providers.mjs';
 import { createAiSettings } from './ai-settings.mjs';
@@ -80,7 +81,8 @@ export async function createApp(options = {}) {
   };
   const screenshotPreferences = uid => ({ provider: defaultProvider, models: {codex:'',claude:''}, ...jsonParse(db.prepare('SELECT value FROM model_preferences WHERE user_id=?').get(accountAi.owner() || uid)?.value,{}) });
   const owned = (table, id, userId) => { const r = db.prepare(`SELECT * FROM ${table} WHERE id=? AND user_id=?`).get(id, userId); if (!r) fail(404, '记录不存在'); return r; };
-  const ownedCapture = (id, userId) => { const row = db.prepare('SELECT * FROM captures WHERE id=? AND user_id=?').get(id, userId); if (!row) fail(404, '本题截图已被删除，请重新上传本机缓存后重试', 'CAPTURE_NOT_FOUND'); return row; };
+  let history;
+  const ownedCapture = (id, userId) => {history?.assertNotDeletedId(userId,id);const row = db.prepare('SELECT * FROM captures WHERE id=? AND user_id=?').get(id, userId); if (!row) fail(404, '本题截图已被删除，请重新上传本机缓存后重试', 'CAPTURE_NOT_FOUND');return row; };
   const promptView = p => ({ id: p.id, name: p.name, content: p.content, isDefault: !!p.is_default, version: p.version, createdAt: p.created_at, updatedAt: p.updated_at });
   const knowledgeView = k => ({ id: k.id, name: k.name, size: k.size, status: k.status, error: k.error, characters: k.text.length, createdAt: k.created_at });
   const taskCaptures = t => {
@@ -101,8 +103,9 @@ export async function createApp(options = {}) {
   const worker = createWorker({ db, dataDir, runner, publish: realtime.publish, taskView, concurrency: options.concurrency || Number(process.env.WORKER_CONCURRENCY) || 1, timeoutMs: options.timeoutMs || Number(process.env.AI_TIMEOUT_MS) || 180000, autoStart: options.startWorker !== false });
   const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, audioRunner: options.audioRunner, omni: options.omni, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews, accountAi });
   protectedRouter.use('/interviews', interviews.router);
+  history=await createHistoryService({db,dataDir,worker,interviews,publish:realtime.publish,captureView,taskView,liveIdentity,options:options.history});interviews.setHistory(history);protectedRouter.use('/history',history.router);
 
-  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.5.3' }));
+  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.6.0' }));
   const loginLimit = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: '登录尝试过多，请 15 分钟后重试' } });
   app.post('/api/auth/login', loginLimit, asyncRoute(async (req, res) => {
     const email = typeof req.body.email === 'string' ? req.body.email.toLowerCase().trim() : '';
@@ -314,6 +317,7 @@ export async function createApp(options = {}) {
       if (db.prepare('SELECT count(*) AS n FROM quota_events WHERE user_id=? AND created_at>=?').get(uid, today).n >= u.daily_limit) fail(429, '已达到今日任务额度');
       if (db.prepare("SELECT count(*) AS n FROM tasks WHERE user_id=? AND status IN ('queued','running')").get(uid).n >= 5) fail(429, '待处理任务过多，请稍后再试');
       const preferences=screenshotPreferences(uid);
+      history.trimTasks(uid,{reserve:1});
       const mayConfigure=allowModelOverride&&userRow(uid).role==='admin';
       const provider = mayConfigure ? input.provider || preferences.provider : preferences.provider; if (!['codex', 'claude'].includes(provider)) fail(400, '模型服务不受支持');
       const configuredModel=preferences.models[provider] || accountAi.profile('screenshot.'+provider).model || defaultTextModel(provider,options.cli);
@@ -344,6 +348,7 @@ export async function createApp(options = {}) {
     if (!req.file) fail(400, '请选择截图图片');
     const key = req.body.captureId; if (!UUID.test(key || '')) fail(400, 'captureId 必须是 UUID');
     const uid = req.identity.userId;
+    history.assertNotDeletedKey(uid,key);
     const existing = db.prepare('SELECT * FROM captures WHERE user_id=? AND capture_key=?').get(uid, key);
     if (existing) {
       const filename = path.join(dataDir, existing.path);
@@ -366,9 +371,9 @@ export async function createApp(options = {}) {
       const task = db.prepare('SELECT * FROM tasks WHERE capture_id=? ORDER BY created_at LIMIT 1').get(existing.id);
       return res.json({ capture: captureView(existing), task: task ? taskView(task) : null });
     }
-    const storage = db.prepare('SELECT count(*) AS n FROM captures WHERE user_id=?').get(uid).n;
-    if (storage >= 5000) fail(400, '截图数量已达上限，请先删除历史截图');
     const metadata = await screenshotMetadata(req.file.buffer); liveIdentity(req);
+    const release=await history.reserve(uid,{kind:'captures',bytes:req.file.buffer.length,check:()=>liveIdentity(req)});
+    try{
     const analyze = (req.body.analyze === undefined || req.body.analyze === 'true') && !!userRow(uid).auto_analyze;
     if (req.body.analyze !== undefined && !['true', 'false'].includes(req.body.analyze)) fail(400, 'analyze 必须为 true 或 false');
     let deviceId = req.identity.deviceId || req.body.deviceId || null; if (deviceId) owned('devices', deviceId, uid);
@@ -379,10 +384,11 @@ export async function createApp(options = {}) {
     try {
       db.transaction(() => {
         liveIdentity(req); if (deviceId) owned('devices', deviceId, uid);
+        history.assertNotDeletedKey(uid,key);
         // A competing upload may have completed while validating the image.
         const race = db.prepare('SELECT * FROM captures WHERE user_id=? AND capture_key=?').get(uid, key);
         if (race) return;
-        db.prepare('INSERT INTO captures(id,user_id,capture_key,device_id,path,mime,created_at) VALUES(?,?,?,?,?,?,?)').run(id, uid, key, deviceId, relative, `image/${metadata.format === 'jpeg' ? 'jpeg' : metadata.format}`, now());
+        db.prepare('INSERT INTO captures(id,user_id,capture_key,device_id,path,mime,size,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id, uid, key, deviceId, relative, `image/${metadata.format === 'jpeg' ? 'jpeg' : metadata.format}`,req.file.buffer.length,now());history.captureWritten(uid);
         task = analyze ? createTask(uid, id, req.body, false, null, req.identity.kind==='web') : null;
       })();
     } catch (e) { await unlink(path.join(dataDir, relative)).catch(() => {}); throw e; }
@@ -391,6 +397,7 @@ export async function createApp(options = {}) {
     const capture = captureView(saved); realtime.publish(uid, { type: 'capture.created', capture });
     if (task) realtime.publish(uid, { type: 'task.updated', task });
     res.status(201).json({ capture, task });
+    }finally{release();}
   }));
   const limit = req => Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50));
   protectedRouter.get('/captures', (req, res) => res.json({ captures: db.prepare('SELECT * FROM captures WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit(req)).map(captureView) }));
@@ -422,14 +429,9 @@ export async function createApp(options = {}) {
   }));
   protectedRouter.delete('/captures/:id', browserOnly, asyncRoute(async (req, res) => {
     const c = owned('captures', req.params.id, req.identity.userId);
-    db.transaction(() => {
-      const tasks = db.prepare('SELECT DISTINCT t.id FROM tasks t LEFT JOIN task_captures tc ON tc.task_id=t.id WHERE t.capture_id=? OR tc.capture_id=?').all(c.id, c.id);
-      for (const t of tasks) { worker.cancel(t.id); db.prepare('DELETE FROM tasks WHERE id=?').run(t.id); }
-      db.prepare('DELETE FROM captures WHERE id=?').run(c.id);
-    })();
-    await unlink(path.join(dataDir, c.path)).catch(() => {}); res.json({ ok: true });
+    await history.removeCapture(req.identity.userId,c.id,()=>liveIdentity(req));res.json({ok:true});
   }));
-  protectedRouter.post('/captures/:id/analyze', (req, res) => { const c = owned('captures', req.params.id, req.identity.userId); const task = createTask(req.identity.userId, c.id, req.body,true,null,req.identity.kind==='web'); realtime.publish(req.identity.userId, { type: 'task.updated', task }); res.status(201).json({ task }); });
+  protectedRouter.post('/captures/:id/analyze', (req, res) => { const c = ownedCapture(req.params.id,req.identity.userId); const task = createTask(req.identity.userId, c.id, req.body,true,null,req.identity.kind==='web'); realtime.publish(req.identity.userId, { type: 'task.updated', task }); res.status(201).json({ task }); });
   protectedRouter.get('/tasks', (req, res) => res.json({ tasks: db.prepare('SELECT * FROM tasks WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit(req)).map(taskView) }));
   protectedRouter.get('/tasks/:id', (req, res) => res.json({ task: taskView(owned('tasks', req.params.id, req.identity.userId)) }));
   protectedRouter.post('/tasks/:id/cancel', (req, res) => {
@@ -469,5 +471,5 @@ export async function createApp(options = {}) {
   });
   const cleanup = setInterval(() => { const timestamp = now(); db.prepare('DELETE FROM sessions WHERE expires_at<?').run(timestamp); db.prepare('DELETE FROM pairings WHERE expires_at<? AND (approved=0 OR expires_at<?)').run(timestamp, new Date(Date.now() - 86400000).toISOString()); db.prepare('DELETE FROM quota_events WHERE created_at<?').run(new Date(Date.now() - 7 * 86400000).toISOString()); }, 3600000); cleanup.unref();
   let closed = false;
-  return { app, server, db, dataDir, worker, interviews, createUser: input => createUser(db, input), async close() { if (closed) return; closed = true; clearInterval(cleanup); await interviews.close(); await worker.close(); await realtime.close(); if (server.listening) { server.closeAllConnections(); await new Promise(r => server.close(r)); } db.close(); } };
+  return { app, server, db, dataDir, worker, interviews,history, createUser: input => createUser(db, input), async close() { if (closed) return; closed = true; clearInterval(cleanup);await history.close(); await interviews.close(); await worker.close(); await realtime.close(); if (server.listening) { server.closeAllConnections(); await new Promise(r => server.close(r)); } db.close(); } };
 }

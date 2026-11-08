@@ -36,7 +36,17 @@ All JSON responses are objects; errors: `{error: string, code?: string}`. Dates 
 - `POST /tasks/:id/cancel` -> `{task}`; `POST /tasks/:id/retry` -> `{task}` only failed/cancelled, resets answer and enqueues with quota check.
 - Worker queue is durable SQLite, atomic claim, restart recovery, bounded concurrency and timeout. Native CLI first; Docker per-job execution configurable for multi-user cloud isolation. Tests inject fake runner; never silently serve fake answers in production.
 
-## WebSocket
+## History management (1.6.0)
+
+- `GET /history/settings` -> `{settings,usage,rawAudioRetentionDays}`. Per-account settings default to `{retentionDays:30,maxCaptures:1000,maxInterviews:200,maxStorageMiB:1024,autoCleanup:true}`. Usage includes record counts, capture/audio media bytes, protected record counts and pending physical-file deletion bytes.
+- Browser `PUT /history/settings` accepts the flat settings object (partial updates allowed); validation enforces finite positive limits. Saving maintains according to the updated policy. `POST /history/cleanup {}` explicitly runs the saved policy even if automatic cleanup is disabled.
+- `GET /history/captures|interviews?limit=50&cursor=...&search=...` -> `{items,total,nextCursor,hasMore}`. Stable descending `(createdAt,id)` pagination, max200/page, escaped account-owned search. Items include `protected`/`protectedReason`; captures include size and latest task, interviews include audio bytes.
+- Browser `POST /history/delete {kind:'captures'|'interviews',ids:UUID[]}` or `{kind,all:true,before?:ISODate}` -> `{deletedIds,deletedTaskIds,skippedIds,deletedCount,usage}`. Validate every selected ID before mutation. Bulk deletion skips active tasks and unfinished interviews; legacy single DELETE can explicitly stop them.
+- Deletions remove associated SQL and media. Failed physical removal is journaled for retry and remains counted toward storage. Account/time/count/media budgets govern maintenance and admission; active records are protected and new data is refused when no eligible space can be freed.
+- Owner-only events `{type:'history.deleted',kind,deletedIds,deletedTaskIds,captureKeys,requestIds,reason}` and `{type:'history.updated',settings?,usage?}` update connected pages/devices. Deletion events are chunked to bounded messages; interview removal also emits `interview.deleted` for compatibility.
+- Intentional screenshot deletions keep bounded30-day tombstones (at most10000/account); reupload or analysis of a tombstoned key/ID returns410 `HISTORY_DELETED`. Updated desktop clients cancel that batch, distinct from repairable `CAPTURE_NOT_FOUND`/`CAPTURE_FILE_MISSING`.
+
+## WebSocket transport
 - Browser/device `POST /ws-ticket {kind:'web'|'desktop'}` -> `{ticket}`; auth determines kind; ticket TTL 30 seconds single use.
 - Connect `/ws?ticket=...`; first event `{type:'hello',peerId,kind,devices:[...]}`. Peer IDs are connection IDs, ephemeral.
 - Events `{type:'devices.updated',devices}`, `{type:'capture.created',capture}`, `{type:'task.updated',task}`, `{type:'task.delta',taskId,delta}`, `{type:'peer.joined',peer:{id,kind,deviceId?,name}}`, `{type:'peer.left',peerId}`; hello also includes `peers`.

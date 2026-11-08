@@ -9,6 +9,7 @@ const WebSocket=require('ws');
 const QRCode=require('qrcode');
 const {DEFAULT_SETTINGS,normalizeCloudUrl,validateSettings,cropRect,screenshotSelection}=require('./lib/core.cjs');
 const {CaptureQueue}=require('./lib/queue.cjs');
+const {affectedCaptureBatches,intentionalCaptureDeletion}=require('./lib/capture-history.cjs');
 const {AudioController}=require('./lib/audio-main.cjs');
 const {UpdateController}=require('./lib/updater.cjs');
 const {createUpdateFetch}=require('./lib/update-fetch.cjs');
@@ -102,7 +103,7 @@ async function connect(){
     const url=new URL('/ws',credential.cloudUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.searchParams.set('ticket',ticket);
     const ws=new WebSocket(url,{maxPayload:256*1024,handshakeTimeout:15000,followRedirects:false});socket=ws;
     ws.on('open',()=>{if(ownGeneration!==generation)return;state.connected=true;state.connecting=false;state.error='';reconnectAttempts=0;changed();processQueue().catch(message);});
-    ws.on('message',raw=>{if(ownGeneration!==generation)return;try{const event=JSON.parse(raw.toString());if(event.type==='ping'){ws.send(JSON.stringify({type:'pong'}));return;}if(event.type==='hello')emit('rtc-config',{iceServers:config.iceServers||[],deviceId:me.device.id});audioController?.receive(event);emit('network-event',event);}catch{}});
+    ws.on('message',raw=>{if(ownGeneration!==generation)return;try{const event=JSON.parse(raw.toString());if(event.type==='ping'){ws.send(JSON.stringify({type:'pong'}));return;}if(event.type==='hello')emit('rtc-config',{iceServers:config.iceServers||[],deviceId:me.device.id});if(event.type==='history.deleted'&&event.kind==='captures')void captureHistoryDeleted(event).catch(message);audioController?.receive(event);emit('network-event',event);}catch{}});
     ws.on('error',()=>{if(ownGeneration===generation){state.error='实时连接中断，正在重连';changed();}});
     ws.on('close',(code)=>{if(ownGeneration!==generation)return;emit('network-reset',{});if(code===4001||code===4003){revoked().catch(message);}else scheduleReconnect();});
   }catch(e){if(ownGeneration!==generation)return;if(e.status===401||e.status===403)await revoked();else{state.error=e.message;scheduleReconnect();}}
@@ -199,6 +200,20 @@ async function discardScreenshot(id){
 async function clearScreenshots(){
   assertNotInstalling();if(!credential)throw new Error('请先配对设备');const ids=new Set(queue.staged(credential.deviceId).map(x=>x.captureId));await queue.clearStaged(credential.deviceId);recent=recent.filter(x=>!ids.has(x.captureId));if(ids.has(state.lastCapture?.captureId)){state.lastCapture=null;lastImage=null;}changed();return snapshot();
 }
+function forgetCaptureImages(ids){
+  const removed=new Set(ids);recent=recent.filter(x=>!removed.has(x.captureId));if(removed.has(state.lastCapture?.captureId)){state.lastCapture=null;lastImage=null;}
+  for(const id of removed){lanAttempted.delete(id);directWaiters.get(id)?.(false);}
+}
+async function cancelCaptureBatches(ids,owner=credential){
+  for(const id of ids){if(credential!==owner)return;const batch=queue.batches.find(x=>x.id===id&&x.deviceId===owner?.deviceId);if(!batch)continue;const removed=await queue.abortBatch(id);if(credential!==owner)return;forgetCaptureImages(removed);}
+  changed();
+}
+async function captureHistoryDeleted(event){
+  const owner=credential;if(!owner)return;
+  await cancelCaptureBatches(affectedCaptureBatches(queue,event,owner.deviceId),owner);
+  if(credential!==owner)return;
+  forgetCaptureImages(Array.isArray(event.captureKeys)?event.captureKeys.slice(0,200):[]);changed();
+}
 async function tryDirect(job,bytes){
   if(!settings.lanFirst||!peerCount)return false;
   return new Promise(resolve=>{
@@ -210,30 +225,34 @@ async function tryDirect(job,bytes){
 async function processQueue(){
   if(uploading||!credential||quitting||updater?.view().phase==='installing')return;uploading=true;
   try{
-    for(const batch of queue.batches.filter(x=>x.status!=='submitted')){
-      if(!credential||batch.deviceId!==credential.deviceId)continue;if(batch.nextAttemptAt>Date.now())break;
+    batchLoop:for(const batch of queue.batches.filter(x=>x.status!=='submitted')){
+      if(!credential||batch.deviceId!==credential.deviceId||!queue.batches.some(x=>x.id===batch.id))continue;if(batch.nextAttemptAt>Date.now())break;
       const owner=credential;
       uploadingBatchId=batch.id;changed();
       try{
         for(const captureId of batch.captureIds){
           if(credential!==owner)return;
+          if(!queue.batches.some(x=>x.id===batch.id))continue batchLoop;
           const job=queue.items.find(x=>x.captureId===captureId&&x.batchId===batch.id);if(!job)throw new Error('本题截图缓存缺失，请检查客户端数据');if(job.uploadedId)continue;
           const bytes=await queue.read(job.captureId);if(credential!==owner)return;
+          if(!queue.batches.some(x=>x.id===batch.id))continue batchLoop;
           let direct=false;
           if(!job.forceCloud&&!lanAttempted.has(job.captureId)){lanAttempted.add(job.captureId);direct=await tryDirect(job,bytes);}
           if(credential!==owner)return;
+          if(!queue.batches.some(x=>x.id===batch.id))continue batchLoop;
           let cloudId=direct?.cloudCaptureId;
           if(!cloudId){
             const form=new FormData();form.append('image',new Blob([bytes],{type:job.mime}),job.name);for(const key of ['captureId','deviceId','analyze'])if(job[key]!==undefined&&job[key]!==null)form.append(key,String(job[key]));
             const result=await api('/captures',{method:'POST',body:form,timeout:45000,secret:owner.secret,baseUrl:owner.cloudUrl});cloudId=result.capture?.id;
           }
-          if(credential!==owner)return;await queue.markUploaded(job.captureId,cloudId);lanAttempted.delete(job.captureId);const item=recent.find(x=>x.captureId===job.captureId);if(item)item.status=direct?'直传完成':'上传完成';if(state.lastCapture?.captureId===job.captureId)state.lastCapture.status=direct?'直传完成':'上传完成';changed();
+          if(credential!==owner)return;if(!queue.batches.some(x=>x.id===batch.id))continue batchLoop;await queue.markUploaded(job.captureId,cloudId);lanAttempted.delete(job.captureId);const item=recent.find(x=>x.captureId===job.captureId);if(item)item.status=direct?'直传完成':'上传完成';if(state.lastCapture?.captureId===job.captureId)state.lastCapture.status=direct?'直传完成':'上传完成';changed();
         }
         if(credential!==owner)return;
+        if(!queue.batches.some(x=>x.id===batch.id))continue;
         const captureIds=batch.captureIds.map(id=>queue.items.find(x=>x.captureId===id)?.uploadedId);
         const result=await api('/captures/analyze',{method:'POST',body:{captureIds,requestId:batch.id,provider:batch.provider,model:batch.model},secret:owner.secret,baseUrl:owner.cloudUrl,timeout:45000});
-        if(credential!==owner)return;await queue.completeBatch(batch.id,result.task?.id);state.error='';changed();
-      }catch(e){if(credential!==owner)return;const stale=['CAPTURE_NOT_FOUND','CAPTURE_FILE_MISSING'].includes(e.code);if(stale)await queue.resetUploads(batch.id);const explanation=stale?'部分云端截图已被移除，本机原图已保留，重试时将重新上传整题':e.status===404&&e.message==='接口不存在'?'云端尚未支持多图整题回答，请先更新服务端；截图已保留，更新后点击重试上传':e.message;await queue.failBatch(batch.id,explanation);if(e.status===401||e.status===403){await revoked();break;}message(explanation);break;}
+        if(credential!==owner)return;if(!queue.batches.some(x=>x.id===batch.id))continue;await queue.completeBatch(batch.id,result.task?.id);state.error='';changed();
+      }catch(e){if(credential!==owner)return;if(intentionalCaptureDeletion(e)){await cancelCaptureBatches([batch.id],owner);state.error='';continue;}if(!queue.batches.some(x=>x.id===batch.id))continue;const stale=['CAPTURE_NOT_FOUND','CAPTURE_FILE_MISSING'].includes(e.code);if(stale)await queue.resetUploads(batch.id);const explanation=stale?'部分云端截图已被移除，本机原图已保留，重试时将重新上传整题':e.status===404&&e.message==='接口不存在'?'云端尚未支持多图整题回答，请先更新服务端；截图已保留，更新后点击重试上传':e.message;await queue.failBatch(batch.id,explanation);if(e.status===401||e.status===403){await revoked();break;}message(explanation);break;}
     }
   }finally{uploading=false;uploadingBatchId=null;changed();}
 }
@@ -283,6 +302,7 @@ function registerIpc(){
 app.on('second-instance',showWindow);
 app.whenReady().then(async()=>{
   app.setAppUserModelId('cn.duallink.client');await load();queue=new CaptureQueue(path.join(app.getPath('userData'),'pending'));await queue.load();
+  await queue.cleanupOrphans().catch(error=>console.warn('清理未引用截图缓存失败：',error.code||'filesystem'));
   if(credential){const images=queue.items.filter(x=>x.deviceId===credential.deviceId);recent=images.slice(-8).reverse().map(x=>({captureId:x.captureId,createdAt:x.createdAt,width:x.width,height:x.height,status:x.batchId?'排队提交':'待触发回答'}));const latest=images.at(-1);if(latest){state.lastCapture=recent[0];try{lastImage=`data:${latest.mime};base64,${(await queue.read(latest.captureId)).toString('base64')}`;}catch{}}}
   audioController=new AudioController({root:path.join(app.getPath('userData'),'audio'),getOwner:()=>credential,api:(owner,route,options={})=>api(route,{...options,secret:owner.secret,baseUrl:owner.cloudUrl}),emit:(channel,data)=>channel==='audio.state'?changed():emit(channel,data),onUnauthorized:()=>revoked().catch(message)});
   const cacheDir=path.join(app.getPath('userData'),'updates');
@@ -301,6 +321,7 @@ app.whenReady().then(async()=>{
   registerIpc();await win.loadFile(path.join(__dirname,'renderer','index.html'));
   tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'assets','icon.png')).resize({width:24,height:24}));tray.on('double-click',showWindow);bindShortcuts();changed();
   if(credential)connect().catch(message);setInterval(()=>processQueue().catch(message),3000).unref();
+  setInterval(()=>{void queue.cleanupOrphans().catch(error=>console.warn('清理未引用截图缓存失败：',error.code||'filesystem'));},3600000).unref();
   if(!testMode&&settings.autoCheckUpdates&&updateView().supported){updateTimer=setTimeout(()=>updater.check().catch(()=>{}),10000);updateTimer.unref();}
   screen.on('display-added',changed);screen.on('display-removed',changed);
 }).catch(error=>{console.error('启动失败：',error.message);quitting=true;app.quit();});

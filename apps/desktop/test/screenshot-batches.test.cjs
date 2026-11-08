@@ -61,3 +61,22 @@ test('stale cloud upload IDs can be reset without losing local images, question 
  await q.markUploaded(a.captureId,'deleted-cloud');await q.markUploaded(b.captureId,'other-cloud');await q.failBatch(batch.id,'截图已被删除');await q.resetUploads(batch.id);
  const restored=new CaptureQueue(dir);await restored.load();assert.deepEqual(restored.waitingUploads().map(x=>x.captureId),[a.captureId,b.captureId]);assert.ok(restored.waitingUploads().every(x=>x.forceCloud===true),'stale LAN acknowledgements must be bypassed even after restart');assert.equal(restored.batches[0].id,batch.id);assert.equal(restored.batches[0].model,'vision');assert.equal((await restored.read(a.captureId)).toString(),'a');
 }));
+
+test('intentional cloud deletion terminates only its batch and never puts its images back into the next draft',()=>fixture(async(q,dir)=>{
+ const a=await q.add(Buffer.from('deleted-question'),metadata);const first=await q.submit({deviceId:'pc1',captureIds:[a.captureId],provider:'codex'});
+ const b=await q.add(Buffer.from('next-question'),metadata);const next=await q.submit({deviceId:'pc1',captureIds:[b.captureId],provider:'claude'});const draft=await q.add(Buffer.from('draft'),metadata);
+ const removed=await q.abortBatch(first.id);assert.deepEqual(removed,[a.captureId]);assert.deepEqual(q.batches.map(x=>x.id),[next.id]);assert.deepEqual(q.staged('pc1').map(x=>x.captureId),[draft.captureId]);
+ const restored=new CaptureQueue(dir);await restored.load();assert.deepEqual(restored.batches.map(x=>x.id),[next.id]);assert.equal((await restored.read(b.captureId)).toString(),'next-question');await assert.rejects(fs.access(path.join(dir,a.captureId+'.png')));
+ assert.deepEqual(await restored.abortBatch(first.id),[]);
+}));
+
+test('cloud deletion can prune the matching completed local history without touching waiting uploads',()=>fixture(async q=>{
+ const a=await q.add(Buffer.from('old'),metadata);const batch=await q.submit({deviceId:'pc1',captureIds:[a.captureId],provider:'codex'});await q.markUploaded(a.captureId,'cloud');await q.completeBatch(batch.id,'task');const draft=await q.add(Buffer.from('new'),metadata);
+ assert.deepEqual(await q.abortBatch(batch.id),[a.captureId]);assert.equal(q.batches.length,0);assert.equal(q.staged('pc1')[0].captureId,draft.captureId);
+}));
+
+test('expired unreferenced screenshot files are reclaimed while unsent drafts and fresh writes are protected',()=>fixture(async(q,dir)=>{
+ const {randomUUID}=require('node:crypto'),old=new Date(Date.now()-31*86400000),draft=await q.add(Buffer.from('keep'),metadata),orphan=randomUUID(),fresh=randomUUID();
+ await fs.writeFile(path.join(dir,orphan+'.png'),'orphan');await fs.utimes(path.join(dir,orphan+'.png'),old,old);await fs.utimes(path.join(dir,draft.captureId+'.png'),old,old);await fs.writeFile(path.join(dir,fresh+'.png'),'fresh');await fs.writeFile(path.join(dir,'unknown.txt'),'leave');
+ assert.equal(await q.cleanupOrphans(),1);await assert.rejects(fs.access(path.join(dir,orphan+'.png')));assert.equal((await q.read(draft.captureId)).toString(),'keep');assert.equal(await fs.readFile(path.join(dir,fresh+'.png'),'utf8'),'fresh');assert.equal(await fs.readFile(path.join(dir,'unknown.txt'),'utf8'),'leave');
+}));

@@ -71,3 +71,9 @@ test('long-session status and frame reads use constant-time indexes instead of s
   spool.records.filter=()=>{throw new Error('status scanned full history');};spool.records.some=()=>{throw new Error('read scanned full history');};
   assert.equal(spool.view().pending,1);assert.equal((await spool.read(record)).length,18);await spool.ack('remote',0);assert.equal(spool.view().pending,0);
 });
+
+test('ended cache expiry is measured from completion rather than the first recording day',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'dual-audio-expiry-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));const owner={deviceId:'A',cloudUrl:'https://example.com'};
+ const spool=await spools.AudioSpool.create(root,{sessionId:randomUUID(),...owner,startedAt:Date.now()-40*86400000});await spool.status('ended');
+ assert.ok(spool.meta.endedAt>Date.now()-1000);assert.deepEqual(await spools.AudioSpool.cleanup(root,owner),[]);await fs.access(spool.dir);
+});

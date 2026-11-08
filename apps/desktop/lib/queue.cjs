@@ -41,6 +41,19 @@ class CaptureQueue{
   });}
   markUploaded(id,uploadedId){return this.mutate(async()=>{const item=this.items.find(x=>x.captureId===id&&x.batchId);if(!item)throw new Error('待传截图不存在');if(typeof uploadedId!=='string'||!uploadedId||uploadedId.length>100)throw new Error('服务未返回有效截图编号');item.uploadedId=uploadedId;item.error='';await this.persist();});}
   resetUploads(id){return this.mutate(async()=>{const batch=this.batches.find(x=>x.id===id&&x.status!=='submitted');if(!batch)throw new Error('待答批次不存在');for(const item of this.items)if(item.batchId===id){item.uploadedId=null;item.nextAttemptAt=0;item.forceCloud=true;}await this.persist();});}
+  abortBatch(id){return this.mutate(async()=>{
+    if(!UUID.test(id))throw new Error('截图批次编号无效');const batch=this.batches.find(x=>x.id===id);if(!batch)return [];
+    const ids=[...batch.captureIds];this.items=this.items.filter(x=>x.batchId!==id);this.batches=this.batches.filter(x=>x.id!==id);await this.persist();
+    for(const captureId of ids)await fs.unlink(path.join(this.dir,captureId+'.png')).catch(()=>{});return ids;
+  });}
+  cleanupOrphans({now=Date.now(),retentionDays=30}={}){return this.mutate(async()=>{
+    const cutoff=now-Math.max(1,Math.min(365,Number(retentionDays)||30))*86400000,referenced=new Set(this.items.map(x=>x.captureId+'.png'));let removed=0;
+    for(const entry of await fs.readdir(this.dir,{withFileTypes:true})){
+      if(!entry.isFile()||!entry.name.endsWith('.png')||!UUID.test(entry.name.slice(0,-4))||referenced.has(entry.name))continue;
+      const filename=path.join(this.dir,entry.name),info=await fs.lstat(filename).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+      if(!info?.isFile()||info.mtimeMs>=cutoff)continue;await fs.unlink(filename).catch(error=>{if(error.code!=='ENOENT')throw error;});removed++;
+    }return removed;
+  });}
   failBatch(id,error){return this.mutate(async()=>{const batch=this.batches.find(x=>x.id===id&&x.status!=='submitted');if(!batch)return;batch.status='failed';batch.attempts++;batch.error=String(error).slice(0,240);batch.nextAttemptAt=Date.now()+Math.min(300000,1000*2**Math.min(batch.attempts,8));await this.persist();});}
   retry(){return this.mutate(async()=>{for(const item of this.items)item.nextAttemptAt=0;for(const batch of this.batches)batch.nextAttemptAt=0;await this.persist();});}
   completeBatch(id,taskId){return this.mutate(async()=>{

@@ -3,6 +3,7 @@ import type { AppConfig, Capture, CaptureResult, Device, Peer, Task } from './ty
 import { CaptureAssembler } from './transfer.mjs';
 import type { CaptureMetadata } from './transfer.mjs';
 import type { InterviewEvent } from './interview-types';
+import type {HistoryEvent} from './history-types';
 
 interface Callbacks {
   config: AppConfig;
@@ -18,6 +19,7 @@ interface Callbacks {
   onPreview: (blob: Blob, metadata: CaptureMetadata) => void;
   onUploaded: (result: CaptureResult) => void;
   onInterviewEvent?: (event: InterviewEvent) => void;
+  onHistoryEvent?: (event:HistoryEvent)=>void;
 }
 interface RtcPeer { connection: RTCPeerConnection; deviceId?: string; pendingIce: RTCIceCandidateInit[]; chain: Promise<void>; channel?: RTCDataChannel; resetTransfer?: () => void; }
 
@@ -127,6 +129,7 @@ export class RealtimeClient {
   }
 
   private handleMessage(event: { type?: string; [key: string]: unknown }) {
+    if(event.type==='history.deleted'||event.type==='history.updated'){this.callbacks.onHistoryEvent?.(event as unknown as HistoryEvent);return;}
     if (event.type?.startsWith('interview.')) { this.callbacks.onInterviewEvent?.(event as InterviewEvent); return; }
     switch (event.type) {
       case 'hello': {

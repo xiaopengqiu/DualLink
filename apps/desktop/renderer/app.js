@@ -74,6 +74,7 @@ async function network(event){
   }
 }
 api.onState(render);api.onRtcConfig(config=>{rtcConfig=config;});api.onNetwork(event=>network(event).catch(()=>{}));api.onReset(()=>{for(const id of [...peers.keys()])removePeer(id);});
+api.onNetwork(event=>{if(event.type==='history.deleted'&&event.kind==='captures'){if($('preview-dialog').open)$('preview-dialog').close();$('preview-image').removeAttribute('src');}});
 api.onCapture(({metadata,data})=>{
   if(typeof data!=='string'||data.length>17*1024*1024)return;
   const binary=atob(data),bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);

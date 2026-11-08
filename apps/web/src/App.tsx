@@ -10,13 +10,16 @@ import { api, ApiError } from './api';
 import { RealtimeClient } from './realtime';
 import InterviewPanel from './InterviewPanel';
 import AiSettings from './AiSettings';
+import HistoryPanel from './HistoryPanel';
+import {History as HistoryIcon} from 'lucide-react';
+import type {CaptureHistoryItem,HistoryEvent} from './history-types';
 import { InterviewEventHub } from './interview-state.mjs';
 import { AudioLines } from 'lucide-react';
 import type { AppConfig, Capture, CaptureResult, Device, KnowledgeFile, Prompt, Provider, ScreenshotPreferences, Task, User } from './types';
 
-type Page = 'workspace' | 'interviews' | 'devices' | 'prompts' | 'knowledge' | 'account' | 'users';
+type Page = 'workspace' | 'interviews' | 'history' | 'devices' | 'prompts' | 'knowledge' | 'account' | 'users';
 type Notice = { id: number; message: string; kind: 'success' | 'error' | 'info' };
-const pageTitles: Record<Page, string> = { workspace: '截图工作台', interviews: '面试会话', devices: '连接设备', prompts: '回答风格', knowledge: '我的知识库', account: '账号设置', users: '用户管理' };
+const pageTitles: Record<Page, string> = { workspace: '截图工作台', interviews: '面试会话', history: '历史记录', devices: '连接设备', prompts: '回答风格', knowledge: '我的知识库', account: '账号设置', users: '用户管理' };
 const statusLabels: Record<Task['status'], string> = { queued: '等待处理', running: '正在分析', completed: '已完成', failed: '处理失败', cancelled: '已取消' };
 const providerName = (provider: Provider) => provider === 'claude' ? 'Claude' : 'Codex';
 const formatTime = (value: string) => new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(value));
@@ -56,6 +59,8 @@ export default function App() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [localPreview, setLocalPreview] = useState<{ url: string; captureId: string } | null>(null);
   const [historyQuery, setHistoryQuery] = useState('');
+  const [historyRevision,setHistoryRevision]=useState(0);
+  const [historyInterviewId,setHistoryInterviewId]=useState(initialInterview);
   const [pairCode, setPairCode] = useState(initialPair);
   const [promptDraft, setPromptDraft] = useState({ id: '', name: '', content: '', isDefault: false });
   const [diagnostics, setDiagnostics] = useState<unknown>(null);
@@ -65,6 +70,8 @@ export default function App() {
   const pendingScreenshotIdsRef=useRef<string[]>([]);
   const pendingScreenshotSizes=useRef<Record<string,number>>({});
   const uploadingScreenshots=useRef(false),analyzingScreenshots=useRef(false);
+  const openedHistoryCapture=useRef<CaptureHistoryItem|null>(null);
+  const deletedCaptureIds=useRef(new Set<string>()),deletedTaskIds=useRef(new Set<string>());
   const userIdRef = useRef(user?.id);
   userIdRef.current = user?.id;
 
@@ -100,8 +107,12 @@ export default function App() {
         api.request<{ captures: Capture[] }>('/captures?limit=100'), api.request<{ tasks: Task[] }>('/tasks?limit=100'), api.request<{ devices: Device[] }>('/devices'), api.request<{ prompts: Prompt[] }>('/prompts'), api.request<{ files: KnowledgeFile[] }>('/knowledge'),
       ]);
       if (userIdRef.current !== currentUserId) return;
-      setCaptures(captureResult.captures); setTasks(taskResult.tasks); setDevices(deviceResult.devices); setPrompts(promptResult.prompts); setKnowledge(knowledgeResult.files);
-      setSelectedId(current => captureResult.captures.some(capture => capture.id === current) ? current : captureResult.captures[0]?.id || null);
+      const opened=openedHistoryCapture.current;
+      const freshCaptures=captureResult.captures.filter(capture=>!deletedCaptureIds.current.has(capture.id)),freshTasks=taskResult.tasks.filter(task=>!deletedTaskIds.current.has(task.id)&&!taskCaptureIds(task).some(id=>deletedCaptureIds.current.has(id)));
+      const nextCaptures=opened&&!deletedCaptureIds.current.has(opened.id)&&!freshCaptures.some(capture=>capture.id===opened.id)?[opened,...freshCaptures]:freshCaptures;
+      const nextTasks=opened?.latestTask&&!deletedTaskIds.current.has(opened.latestTask.id)&&!freshTasks.some(task=>task.id===opened.latestTask!.id)?[opened.latestTask,...freshTasks]:freshTasks;
+      setCaptures(nextCaptures); setTasks(nextTasks); setDevices(deviceResult.devices); setPrompts(promptResult.prompts); setKnowledge(knowledgeResult.files);
+      setSelectedId(current => nextCaptures.some(capture => capture.id === current) ? current : nextCaptures[0]?.id || null);
       setPromptId(current => promptResult.prompts.some(prompt => prompt.id === current) ? current : promptResult.prompts.find(prompt => prompt.isDefault)?.id || promptResult.prompts[0]?.id || '');
     } catch (error) { if (userIdRef.current === currentUserId) handleError(error); }
   }, [handleError]);
@@ -112,6 +123,7 @@ export default function App() {
     setConfig(null); setCaptures([]); setTasks([]); setSelectedId(null);
     setDevices([]); setPrompts([]); setKnowledge([]); setUsers([]);
     setLocalPreview(null); setQuestion(''); setHistoryQuery(''); setPromptId('');
+    openedHistoryCapture.current=null;deletedCaptureIds.current.clear();deletedTaskIds.current.clear();setHistoryInterviewId(initialInterview);setHistoryRevision(0);
     setProvider('codex'); setScreenshotModels({codex:'',claude:''});
     let draft={ids:[] as string[],sizes:{} as Record<string,number>,request:null as {signature:string;requestId:string}|null};
     try{draft=readScreenshotDraft(sessionStorage,user?.id);}catch{}
@@ -127,23 +139,42 @@ export default function App() {
     return () => { cancelled = true; };
   }, [user?.id, initialPair, initialInterview, handleError, loadWorkspace]);
 
+  const applyHistoryEvent=useCallback((event:HistoryEvent)=>{
+    setHistoryRevision(value=>value+1);
+    if(event.type!=='history.deleted'||event.kind!=='captures')return;
+    const ids=new Set((event.deletedIds||[]).filter(id=>typeof id==='string')),taskIds=new Set((event.deletedTaskIds||[]).filter(id=>typeof id==='string'));
+    for(const id of ids)deletedCaptureIds.current.add(id);for(const id of taskIds)deletedTaskIds.current.add(id);
+    const opened=openedHistoryCapture.current;
+    if(opened&&ids.has(opened.id))openedHistoryCapture.current=null;
+    else if(opened?.latestTask&&(taskIds.has(opened.latestTask.id)||taskCaptureIds(opened.latestTask).some(id=>ids.has(id))))openedHistoryCapture.current={...opened,latestTask:null};
+    setCaptures(previous=>previous.filter(capture=>!ids.has(capture.id)));
+    setTasks(previous=>previous.filter(task=>!taskIds.has(task.id)&&!taskCaptureIds(task).some(id=>ids.has(id))));
+    setSelectedId(current=>current&&ids.has(current)?null:current);setLocalPreview(null);
+    const next=pendingScreenshotIdsRef.current.filter(id=>!ids.has(id));
+    if(next.length!==pendingScreenshotIdsRef.current.length){
+      pendingScreenshotIdsRef.current=next;pendingScreenshotSizes.current=Object.fromEntries(next.map(id=>[id,pendingScreenshotSizes.current[id]||0]));analysisRequest.current=null;setPendingScreenshotIds(next);
+      try{writeScreenshotDraft(sessionStorage,userIdRef.current,{ids:next,sizes:pendingScreenshotSizes.current,request:null});}catch{}
+    }
+  },[]);
+
   useEffect(() => {
     if (!user || !config) return;
     const realtime = new RealtimeClient({
       config, autoAnalyze: () => false, onConnection: setConnection, onDirectCount: setDirectCount,
-      onCapture: capture => { setCaptures(previous => upsert(previous, capture)); setSelectedId(capture.id); setLocalPreview(previous => previous?.captureId === capture.captureId ? null : previous); },
-      onTask: task => setTasks(previous => upsert(previous, task)),
+      onCapture: capture => { if(deletedCaptureIds.current.has(capture.id))return;setHistoryRevision(value=>value+1);setCaptures(previous => upsert(previous, capture)); setSelectedId(capture.id); setLocalPreview(previous => previous?.captureId === capture.captureId ? null : previous); },
+      onTask: task => {if(deletedTaskIds.current.has(task.id)||taskCaptureIds(task).some(id=>deletedCaptureIds.current.has(id)))return;setHistoryRevision(value=>value+1);setTasks(previous => upsert(previous, task));},
       onDelta: (taskId, delta) => setTasks(previous => previous.map(task => task.id === taskId ? { ...task, answer: (task.answer || '') + delta } : task)),
       onDevices: setDevices, onError: handleError, onRestore: () => { void loadWorkspace(); if (userIdRef.current === user.id) interviewEvents.publish(user.id, { type: 'interview.restore' }); },
-      onInterviewEvent: event => { if (userIdRef.current === user.id) interviewEvents.publish(user.id, event); },
+      onInterviewEvent: event => { if (userIdRef.current === user.id){if(['interview.updated','interview.deleted'].includes(event.type))setHistoryRevision(value=>value+1);interviewEvents.publish(user.id, event);} },
+      onHistoryEvent:event=>{if(userIdRef.current===user.id)applyHistoryEvent(event);},
       onPreview: (blob, metadata) => setLocalPreview({ url: URL.createObjectURL(blob), captureId: metadata.captureId }),
-      onUploaded: result => { setCaptures(previous => upsert(previous, result.capture)); setSelectedId(result.capture.id); if (result.task) setTasks(previous => upsert(previous, result.task!)); setLocalPreview(null); },
+      onUploaded: result => { if(deletedCaptureIds.current.has(result.capture.id))return;setCaptures(previous => upsert(previous, result.capture)); setSelectedId(result.capture.id); if (result.task&&!deletedTaskIds.current.has(result.task.id)) setTasks(previous => upsert(previous, result.task!)); setLocalPreview(null); },
     });
     realtime.start();
     const restore = () => { if (document.visibilityState === 'visible') void loadWorkspace(); };
     document.addEventListener('visibilitychange', restore);
     return () => { realtime.stop(); document.removeEventListener('visibilitychange', restore); };
-  }, [user?.id, config, handleError, loadWorkspace, interviewEvents]);
+  }, [user?.id, config, handleError, loadWorkspace, interviewEvents,applyHistoryEvent]);
   useEffect(() => () => { if (localPreview) URL.revokeObjectURL(localPreview.url); }, [localPreview]);
 
   useEffect(() => {
@@ -183,6 +214,7 @@ export default function App() {
         const form = new FormData(); form.append('image', file); form.append('captureId', captureId()); form.append('analyze', 'false');
         const result = await api.request<CaptureResult>('/captures', { method: 'POST', body: form });
         if(userIdRef.current!==accountId)return;
+        if(deletedCaptureIds.current.has(result.capture.id))continue;
         setCaptures(previous => upsert(previous, result.capture)); setSelectedId(result.capture.id);pendingScreenshotSizes.current[result.capture.id]=file.size;updatePendingScreenshots(previous=>[...previous,result.capture.id]);setPage('workspace');
       }
     }, '截图已缓存到本次题目，确认截全后点击回答');}finally{if(userIdRef.current===accountId)uploadingScreenshots.current=false;}
@@ -200,6 +232,7 @@ export default function App() {
     try{await perform('analyze', async () => {
       const { task } = await api.request<{ task: Task }>('/captures/analyze', { method: 'POST', body: {...body,requestId} });
       if(userIdRef.current!==accountId)return;
+      if(deletedTaskIds.current.has(task.id)||ids.some(id=>deletedCaptureIds.current.has(id)))return;
       setTasks(previous => upsert(previous, task));analysisRequest.current=null;updatePendingScreenshots(previous=>previous.filter(id=>!ids.includes(id)));setSelectedId(ids[0]);
     });}finally{if(userIdRef.current===accountId)analyzingScreenshots.current=false;}
   };
@@ -218,7 +251,7 @@ export default function App() {
   };
   const deleteCapture = async () => {
     if (!selected || !window.confirm('删除这张截图及相关回答？此操作无法撤销。')) return;
-    await perform('deleteCapture', async () => { await api.request(`/captures/${selected.id}`, { method: 'DELETE' }); setCaptures(previous => previous.filter(capture => capture.id !== selected.id)); setTasks(previous => previous.filter(task => !taskCaptureIds(task).includes(selected.id)));updatePendingScreenshots(previous=>previous.filter(id=>id!==selected.id)); setSelectedId(captures.find(capture => capture.id !== selected.id)?.id || null); }, '截图已删除');
+    await perform('deleteCapture', async () => { await api.request(`/captures/${selected.id}`, { method: 'DELETE' }); applyHistoryEvent({type:'history.deleted',kind:'captures',deletedIds:[selected.id],deletedTaskIds:tasks.filter(task=>taskCaptureIds(task).includes(selected.id)).map(task=>task.id),reason:'manual'});setSelectedId(captures.find(capture => capture.id !== selected.id)?.id || null); }, '截图已删除');
   };
   const copyAnswer = async () => { try { await navigator.clipboard.writeText(selectedTask?.answer || ''); notify('回答已复制'); } catch { notify('浏览器不允许自动复制，请长按选择回答内容', 'info'); } };
 
@@ -247,7 +280,12 @@ export default function App() {
   if (!user) return <LoginScreen onLogin={(nextUser, token) => { api.setCsrfToken(token); setUser(nextUser); setPage(initialPair ? 'devices' : initialInterview ? 'interviews' : 'workspace'); }} notify={notify} />;
 
   const navigate = (next: Page) => { setPage(next); setHistoryQuery(''); };
-  const nav = [{ id: 'workspace' as const, title: '截图工作台', icon: <LayoutDashboard size={19} /> }, { id: 'interviews' as const, title: '面试会话', icon: <AudioLines size={19} /> }, { id: 'devices' as const, title: '连接设备', icon: <Monitor size={19} /> }, { id: 'prompts' as const, title: '回答风格', icon: <Sparkles size={19} /> }, { id: 'knowledge' as const, title: '我的知识库', icon: <BookOpen size={19} /> }];
+  const openHistoryCapture=(capture:CaptureHistoryItem)=>{
+    if(deletedCaptureIds.current.has(capture.id)){notify('这张截图已被删除，请刷新历史列表','info');return;}
+    const task=capture.latestTask,stale=task&&(deletedTaskIds.current.has(task.id)||taskCaptureIds(task).some(id=>deletedCaptureIds.current.has(id))),next=stale?{...capture,latestTask:null}:capture;
+    openedHistoryCapture.current=next;setCaptures(previous=>upsert(previous,next));if(next.latestTask)setTasks(previous=>upsert(previous,next.latestTask!));setSelectedId(next.id);setQuestion('');setLocalPreview(null);setPage('workspace');
+  };
+  const nav = [{ id: 'workspace' as const, title: '截图工作台', icon: <LayoutDashboard size={19} /> }, { id: 'interviews' as const, title: '面试会话', icon: <AudioLines size={19} /> }, {id:'history' as const,title:'历史记录',icon:<HistoryIcon size={19}/>}, { id: 'devices' as const, title: '连接设备', icon: <Monitor size={19} /> }, { id: 'prompts' as const, title: '回答风格', icon: <Sparkles size={19} /> }, { id: 'knowledge' as const, title: '我的知识库', icon: <BookOpen size={19} /> }];
 
   return <div className="app-shell">
     <aside className="sidebar">
@@ -261,7 +299,8 @@ export default function App() {
     <div className="app-content">
       <header className="topbar"><div className="breadcrumb"><span>工作空间</span><ChevronRight size={14} /><strong>{pageTitles[page]}</strong></div><div className="topbar-right"><span className="today">{new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date())}</span><span className={`connection-pill ${connection === 'online' ? '' : 'disconnected'}`}>{connection === 'online' ? <Wifi size={13} /> : <WifiOff size={13} />}<span>{connection === 'online' ? '已连接' : '重连中'}</span></span><button className="mobile-account" aria-label="打开账号设置" onClick={() => navigate('account')}>{(user.name || user.email)[0].toUpperCase()}</button></div></header>
       <main className={`main main-${page}`}>
-        {page === 'interviews' && <InterviewPanel isAdmin={user.role==='admin'} key={user.id} ownerId={user.id} events={interviewEvents} prompts={prompts} devices={devices} providers={config?.providers || ['codex', 'claude']} defaultProvider={config?.defaultProvider || 'codex'} initialId={initialInterview} connection={connection} onError={handleError} />}
+        {page === 'interviews' && <InterviewPanel isAdmin={user.role==='admin'} key={`${user.id}:${historyInterviewId}`} ownerId={user.id} events={interviewEvents} prompts={prompts} devices={devices} providers={config?.providers || ['codex', 'claude']} defaultProvider={config?.defaultProvider || 'codex'} initialId={historyInterviewId} connection={connection} onError={handleError} onManageHistory={()=>setPage('history')} />}
+        {page==='history'&&<HistoryPanel key={user.id} ownerId={user.id} refreshKey={historyRevision} onError={handleError} onDeleted={applyHistoryEvent} onOpenCapture={openHistoryCapture} onOpenInterview={id=>{setHistoryInterviewId(id);setPage('interviews');}}/>}
         {page === 'workspace' && <>
           <div className="page-heading"><div><div className="eyebrow">CAPTURE. CONNECT. CLARIFY.</div><h1>让截图，成为答案<span>。</span></h1><p>捕捉电脑上的问题，结合你的知识与风格，接着往下想。</p></div><button className="button primary" onClick={() => uploadRef.current?.click()} disabled={busy === 'upload'}>{busy === 'upload' ? <LoaderCircle className="spin" size={17} /> : <ImagePlus size={18} />}上传截图</button></div>
           {user.role==='admin' && <details className="panel screenshot-preferences"><summary><Settings2 size={15}/><span>截图默认配置</span><small>与面试模型分别保存</small></summary><form onSubmit={saveScreenshotPreferences}><div className="screenshot-model-grid"><label>默认执行方式<select aria-label="截图默认执行方式" value={provider} onChange={event=>setProvider(event.target.value as Provider)}>{(config?.providers||['codex','claude']).map(item=><option key={item} value={item}>{providerName(item)} CLI</option>)}</select></label>{(['codex','claude'] as Provider[]).map(item=><label key={item}>{providerName(item)} 截图模型 ID<input aria-label={`${providerName(item)} 截图模型 ID`} maxLength={100} placeholder="留空使用服务器默认模型" value={screenshotModels[item]} onChange={event=>setScreenshotModels(current=>({...current,[item]:event.target.value}))}/></label>)}</div><div className="screenshot-model-footer"><span>可为截图选高质量模型。模型必须支持图片输入，并在对应 CLI 的接口中可用。下方本次配置可直接修改；保存后成为此账号默认值。</span><button className="button primary compact" disabled={busy==='screenshot-preferences'}>保存截图默认配置</button></div></form></details>}
@@ -286,7 +325,7 @@ export default function App() {
               <div className="question-composer"><label htmlFor="question">补充说明 <span>可选</span></label><textarea id="question" placeholder="例如：请重点解释解题思路，并给出一个例子…" value={question} onChange={event => setQuestion(event.target.value)} maxLength={8000} rows={2} /><div className="composer-footer"><span><ShieldCheck size={13} />仅在你的账号中保存</span>{!pendingScreenshotIds.length && selectedTask && ['queued', 'running'].includes(selectedTask.status) ? <button className="button secondary compact" disabled={busy === 'cancel'} onClick={() => void mutateTask('cancel')}><Square size={13} />取消任务</button> : <button className="button primary compact" disabled={(!selected && !pendingScreenshotIds.length) || !!localPreview || busy === 'analyze' || busy === 'upload'} onClick={() => void analyzeCapture()}>{busy === 'analyze' ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{pendingScreenshotIds.length ? '回答这道题（'+pendingScreenshotIds.length+' 张）' : selectedTask ? '再次分析' : '开始分析'}<ArrowRight size={14} /></button>}</div></div>
             </section>
           </div>
-          <section className="history-section"><div className="section-heading"><div><h2>最近截图 <span>{captures.length}</span></h2><p>每一次捕捉，都保留在你的工作空间。</p></div><label className="search-field"><Search size={15} /><input aria-label="搜索截图历史" placeholder="搜索历史回答" value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} /></label></div>{filteredCaptures.length > 0 ? <div className="capture-history">{filteredCaptures.map(capture => { const task = latestCaptureTask(tasks,capture.id); return <button className={`history-card ${selectedId === capture.id ? 'selected' : ''}`} key={capture.id} onClick={() => { setSelectedId(capture.id); setQuestion(''); setLocalPreview(null); }}><div className="history-image"><img src={capture.imageUrl} alt={`历史截图 ${formatDate(capture.createdAt)}`} loading="lazy" />{selectedId === capture.id && <span><Check size={12} />当前预览</span>}</div><div className="history-card-info"><strong>{capture.deviceName || '网页截图'}</strong><small>{formatDate(capture.createdAt)}</small>{task ? <StatusBadge status={task.status} /> : <span className="status-badge status-manual">待分析</span>}</div></button>; })}</div> : <div className="history-empty"><ScanLine size={18} /><span>{historyQuery ? '没有找到匹配的截图' : '截图历史将显示在这里'}</span></div>}</section>
+          <section className="history-section"><div className="section-heading"><div><h2>最近截图 <span>{captures.length}</span></h2><p>每一次捕捉，都保留在你的工作空间。</p><button className="history-manage-link" onClick={()=>setPage('history')}>管理全部历史 <ArrowRight size={13}/></button></div><label className="search-field"><Search size={15} /><input aria-label="搜索截图历史" placeholder="搜索历史回答" value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} /></label></div>{filteredCaptures.length > 0 ? <div className="capture-history">{filteredCaptures.map(capture => { const task = latestCaptureTask(tasks,capture.id); return <button className={`history-card ${selectedId === capture.id ? 'selected' : ''}`} key={capture.id} onClick={() => { setSelectedId(capture.id); setQuestion(''); setLocalPreview(null); }}><div className="history-image"><img src={capture.imageUrl} alt={`历史截图 ${formatDate(capture.createdAt)}`} loading="lazy" />{selectedId === capture.id && <span><Check size={12} />当前预览</span>}</div><div className="history-card-info"><strong>{capture.deviceName || '网页截图'}</strong><small>{formatDate(capture.createdAt)}</small>{task ? <StatusBadge status={task.status} /> : <span className="status-badge status-manual">待分析</span>}</div></button>; })}</div> : <div className="history-empty"><ScanLine size={18} /><span>{historyQuery ? '没有找到匹配的截图' : '截图历史将显示在这里'}</span></div>}</section>
         </>}
 
         {page === 'devices' && <>

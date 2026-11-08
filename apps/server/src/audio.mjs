@@ -13,7 +13,7 @@ export function parseAudioFrame(buffer, mode = 'live') {
   return { track: buffer[1] === 0 ? 'remote' : 'self', seq: buffer.readUInt32BE(4), startMs: buffer.readUInt32BE(8), sampleCount, pcm: buffer.subarray(16) };
 }
 
-export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory, recordSegment, status, gap, maxSessionMinutes = 120, retentionDays = 7, maxUserBytes = 512 * 1024 * 1024, maxDailyMinutes = 480, asrEnabled = () => true, asrRequired = () => true, asrRequested = () => true, onStored = () => {} }) {
+export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory, recordSegment, status, gap, maxSessionMinutes = 120, retentionDays = 7, maxUserBytes = 512 * 1024 * 1024, maxDailyMinutes = 480, asrEnabled = () => true, asrRequired = () => true, asrRequested = () => true, sessionAvailable = () => true,maxUserBytesFor = () => Infinity,reserveFrame = null,onStored = () => {} }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
   const connections = new Map(), archiveChains = new Map();
   let closed = false;
@@ -25,7 +25,7 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
   const send = (connection, event) => { if (connection.ws.readyState === WebSocket.OPEN && connection.ws.bufferedAmount < 256 * 1024) connection.ws.send(JSON.stringify(event)); };
   const valid = c => {
     const row = db.prepare('SELECT i.status,i.device_id,u.disabled,d.user_id FROM interviews i JOIN users u ON u.id=i.user_id LEFT JOIN devices d ON d.id=? WHERE i.id=? AND i.user_id=?').get(c.deviceId, c.sessionId, c.userId);
-    return !!row && !row.disabled && row.user_id === c.userId && row.device_id === c.deviceId && (c.mode === 'replay' || row.status === 'recording');
+    return sessionAvailable(c.sessionId)&&!!row && !row.disabled && row.user_id === c.userId && row.device_id === c.deviceId && (c.mode === 'replay' || row.status === 'recording');
   };
   const serialArchive = (key, operation) => {
     const prior = archiveChains.get(key) || Promise.resolve();
@@ -58,6 +58,7 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
       if (!valid(c)) fail(403, '录音设备或会话状态已失效');
       const previous = db.prepare('SELECT hash FROM interview_audio_frames WHERE session_id=? AND track=? AND seq=?').get(c.sessionId, frame.track, frame.seq);
       if (previous) { if (previous.hash !== digest) fail(409, '重复音频数据不一致'); return; }
+      const release=reserveFrame?.(c.userId,frame.pcm.length);try{
       if (c.mode === 'live') {
         const latest = db.prepare('SELECT seq,start_ms,sample_count FROM interview_audio_frames WHERE session_id=? AND track=? ORDER BY seq DESC LIMIT 1').get(c.sessionId,frame.track);
         if (latest && (frame.seq <= latest.seq || frame.startMs < latest.start_ms + latest.sample_count / 16 - 5)) fail(400,'音频帧编号或时间轴未延续上次连接');
@@ -68,7 +69,7 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
       if(db.prepare('SELECT frame_count FROM interviews WHERE id=?').get(c.sessionId).frame_count>=300000)fail(429,'本场面试音频帧数达到上限');
       { // Keep working PCM until session completion, even when archival retention is zero.
         const stored = db.prepare('SELECT bytes FROM interview_audio_storage WHERE user_id=?').get(c.userId)?.bytes || 0;
-        if (stored + frame.pcm.length > maxUserBytes) fail(429, '原始录音存储额度已满，请导出并删除旧录音后继续');
+        if (stored + frame.pcm.length > Math.min(maxUserBytes,release?Infinity:maxUserBytesFor(c.userId))) fail(429, '原始录音或历史存储额度已满，请导出并删除旧记录后继续');
         const directory = path.join(dataDir, 'users', c.userId, 'interviews', c.sessionId);
         await mkdir(directory, { recursive: true, mode: 0o700 });
         const handle = await open(path.join(directory, `${frame.track}.pcm`), 'a', 0o600);
@@ -83,6 +84,7 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
         db.prepare('UPDATE interviews SET frame_count=frame_count+1 WHERE id=?').run(c.sessionId);if(firstFrame)queueMicrotask(()=>onStored(c.sessionId));
         if(byteOffset!==null)db.prepare('INSERT INTO interview_audio_storage(user_id,bytes) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET bytes=bytes+excluded.bytes').run(c.userId,frame.pcm.length);
       })();
+      }finally{release?.();}
     });
     c.lastFrames.set(frame.track, frame); c.lastMs = Math.max(c.lastMs, frame.startMs + frame.sampleCount / 16);
     return true;

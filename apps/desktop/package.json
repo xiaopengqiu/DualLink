@@ -1,6 +1,6 @@
 {
   "name": "@dual-link/desktop",
-  "version": "1.5.3",
+  "version": "1.6.0",
   "private": true,
   "description": "双端互联 Windows 截图客户端",
   "author": "Dual Link",

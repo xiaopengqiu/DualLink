@@ -128,3 +128,97 @@ test('a mode change while a trigger is in flight cannot restore the old cached r
  const old=controller.trigger();await started;controller.receive({type:'interview.updated',interview:{...controller.view().interview,mode:'transcript'}});release();await assert.rejects(old,/配置|变化|取消/);
  const fresh=await controller.trigger();assert.equal(triggers,2);assert.equal(fresh.answer.id,'answer2');
 });
+
+test('cloud deletion stops the matching local recording and removes its recoverable files without restarting it',async t=>{
+ const {controller,root,frames}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);
+ await controller.ingest({token:control.token,track:'remote',startMs:10,samples:Buffer.alloc(320)});
+ await controller.receive({type:'interview.deleted',sessionId:control.sessionId});
+ assert.equal(controller.view().phase,'idle');assert.equal(controller.view().interview,null);assert.equal(controller.view().token,null);
+ await assert.rejects(fs.access(path.join(root,control.sessionId)));const count=frames.length;
+ await controller.ingest({token:control.token,track:'self',startMs:20,samples:Buffer.alloc(320)});assert.equal(frames.length,count);
+ await assert.rejects(controller.recover(control.sessionId),/删除/);
+});
+
+test('bulk voice deletion removes only matching-owner local caches and keeps an unrelated active recording',async t=>{
+ const {AudioSpool}=require('../lib/audio-spool.cjs');const {controller,root}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);
+ const owner=controller.getOwner(),id=randomUUID(),foreignId=randomUUID();
+ const old=await AudioSpool.create(root,{sessionId:id,...owner,startedAt:Date.now()});await old.append({track:'remote',startMs:0,samples:Buffer.alloc(32)});
+ const foreign=await AudioSpool.create(root,{sessionId:foreignId,deviceId:'foreign',cloudUrl:'https://elsewhere.example',startedAt:Date.now()});await foreign.append({track:'remote',startMs:0,samples:Buffer.alloc(32)});
+ await controller.receive({type:'history.deleted',kind:'interviews',deletedIds:[id,foreignId]});
+ await assert.rejects(fs.access(old.dir));await fs.access(foreign.dir);await fs.access(path.join(root,control.sessionId));assert.equal(controller.view().phase,'recording');
+});
+
+test('deletion waits for in-flight local reads but cannot upload their frames or revive a late answer',async t=>{
+ const {controller,frames,root}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);
+ const read=controller.spool.read.bind(controller.spool);let release,entered;const started=new Promise(r=>{entered=r;}),gate=new Promise(r=>{release=r;});
+ controller.spool.read=async(...args)=>{entered();await gate;return read(...args);};
+ const writing=controller.ingest({token:control.token,track:'remote',startMs:30,samples:Buffer.alloc(320)});await started;
+ const deleting=controller.receive({type:'interview.deleted',sessionId:control.sessionId});let finished=false;Promise.resolve(deleting).then(()=>{finished=true;});try{await new Promise(r=>setTimeout(r,10));assert.equal(finished,false);}finally{release();}
+ await writing;await deleting;assert.equal(frames.length,0);await assert.rejects(fs.access(path.join(root,control.sessionId)));assert.equal(controller.view().interview,null);
+});
+
+test('refresh prunes only expired ended fully-uploaded local caches and protects pending, active, recent and foreign recordings',async t=>{
+ const {AudioSpool}=require('../lib/audio-spool.cjs');const {controller,root}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);
+ const owner=controller.getOwner(),old=Date.now()-31*86400000,caches={};
+ for(const [name,status,pending,startedAt,deviceId]of [['old','ended',false,old,owner.deviceId],['pending','ended',true,old,owner.deviceId],['paused','paused',false,old,owner.deviceId],['recent','ended',false,Date.now(),owner.deviceId],['foreign','ended',false,old,'foreign']]){
+  const spool=await AudioSpool.create(root,{sessionId:randomUUID(),deviceId,cloudUrl:owner.cloudUrl,startedAt});await spool.append({track:'remote',startMs:0,samples:Buffer.alloc(32)});if(!pending)await spool.ack('remote',0);await spool.status(status);if(status==='ended'){spool.meta.endedAt=startedAt;await spool.saveMeta();}caches[name]=spool;
+ }
+ await controller.refresh();await assert.rejects(fs.access(caches.old.dir));for(const name of ['pending','paused','recent','foreign'])await fs.access(caches[name].dir);await fs.access(path.join(root,control.sessionId));
+});
+
+test('deleting a replay while its audio ticket is pending leaves another recording running',async t=>{
+ const {AudioSpool}=require('../lib/audio-spool.cjs');const {controller,root}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);
+ const old=await AudioSpool.create(root,{sessionId:randomUUID(),...controller.getOwner(),startedAt:Date.now()});await old.append({track:'remote',startMs:0,samples:Buffer.alloc(32)});await old.status('ended');
+ const api=controller.api;let entered,release;const started=new Promise(r=>{entered=r;}),gate=new Promise(r=>{release=r;});
+ controller.api=async(owner,route,options)=>{if(route===`/interviews/${old.id}/audio-ticket`){entered();await gate;}return api(owner,route,options);};
+ const replay=controller.recover(old.id);void replay.catch(()=>{});await started;const deleting=controller.receive({type:'history.deleted',kind:'interviews',deletedIds:[old.id]});release();
+ await assert.rejects(replay,/删除/);await deleting;await assert.rejects(fs.access(old.dir));assert.equal(controller.view().phase,'recording');assert.equal(controller.view().interview.id,control.sessionId);
+});
+
+test('a trigger response arriving after cloud deletion cannot restore an old answer or session',async t=>{
+ const {controller}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);const api=controller.api;let entered,release;const started=new Promise(r=>{entered=r;}),gate=new Promise(r=>{release=r;});
+ controller.api=async(owner,route,options)=>{if(route.endsWith('/trigger')){entered();await gate;}return api(owner,route,options);};
+ const answer=controller.trigger();void answer.catch(()=>{});await started;await controller.receive({type:'interview.deleted',sessionId:control.sessionId});release();await assert.rejects(answer,/删除|变化|取消/);
+ assert.equal(controller.view().phase,'idle');assert.equal(controller.view().interview,null);assert.equal(controller.view().triggerAnswerId,null);
+});
+
+test('deletion while a local session directory is being created cannot leave it behind or revive the session',async t=>{
+ const {AudioSpool}=require('../lib/audio-spool.cjs');const {controller,root}=await setup(t);const create=AudioSpool.create;let entered,release;const started=new Promise(r=>{entered=r;}),gate=new Promise(r=>{release=r;});
+ AudioSpool.create=async(...args)=>{entered(args[1].sessionId);await gate;return create(...args);};
+ try{const starting=controller.start({});void starting.catch(()=>{});const id=await started;await controller.receive({type:'interview.deleted',sessionId:id});release();await assert.rejects(starting,/删除/);await assert.rejects(fs.access(path.join(root,id)));assert.equal(controller.view().phase,'idle');assert.equal(controller.view().interview,null);}finally{release();AudioSpool.create=create;}
+});
+
+test('a locked deleted cache reports an error without trapping the client in a stopping recording',async t=>{
+ const {controller}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);const spool=controller.spool,remove=spool.remove.bind(spool);spool.remove=async()=>{throw new Error('缓存文件正在使用');};
+ try{await assert.rejects(controller.receive({type:'interview.deleted',sessionId:control.sessionId}),/使用/);assert.equal(controller.view().phase,'idle');assert.equal(controller.view().token,null);assert.equal(controller.view().interview,null);assert.match(controller.view().error,/清理失败/);}finally{spool.remove=remove;await remove();}
+});
+
+test('deletion during a pending resume response cannot regress the cleared session back to paused',async t=>{
+ const {controller}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);await controller.pause();const api=controller.api;let entered,release;const started=new Promise(r=>{entered=r;}),gate=new Promise(r=>{release=r;});
+ controller.api=async(owner,route,options)=>{if(route.endsWith('/resume')){entered();await gate;}return api(owner,route,options);};
+ const resuming=controller.resume();void resuming.catch(()=>{});await started;await controller.receive({type:'interview.deleted',sessionId:control.sessionId});release();await assert.rejects(resuming,/删除/);assert.equal(controller.view().phase,'idle');assert.equal(controller.view().interview,null);
+});
+
+test('a deleted newly-created session HTTP response leaves no connecting state or new local directory',async t=>{
+ const {controller,root,interview}=await setup(t);const api=controller.api;let entered,release;const started=new Promise(r=>{entered=r;}),gate=new Promise(r=>{release=r;});
+ controller.api=async(owner,route,options)=>{const result=await api(owner,route,options);if(route==='/interviews'&&options?.method==='POST'){entered();await gate;}return result;};
+ const starting=controller.start({});void starting.catch(()=>{});await started;await controller.receive({type:'interview.deleted',sessionId:interview.id});release();await assert.rejects(starting,/删除/);assert.equal(controller.view().phase,'idle');assert.equal(controller.view().interview,null);await assert.rejects(fs.access(path.join(root,interview.id)));
+});
+
+test('offline deletion confirmed by the session404 removes only its own pending local recovery cache',async t=>{
+ const {AudioSpool}=require('../lib/audio-spool.cjs');const {controller,root}=await setup(t);const spool=await AudioSpool.create(root,{sessionId:randomUUID(),...controller.getOwner(),startedAt:Date.now()});await spool.append({track:'remote',startMs:0,samples:Buffer.alloc(32)});
+ const api=controller.api;controller.api=async(owner,route,options)=>{if(route.startsWith('/interviews/'+spool.id))throw Object.assign(new Error('记录不存在'),{status:404});return api(owner,route,options);};
+ await assert.rejects(controller.recover(spool.id),/删除/);await assert.rejects(fs.access(spool.dir));assert.equal(controller.view().recoveries.some(row=>row.id===spool.id),false);
+});
+
+test('an audio-ticket404 alone cannot delete local audio when the authoritative session still exists',async t=>{
+ const {AudioSpool}=require('../lib/audio-spool.cjs');const {controller,root}=await setup(t);const spool=await AudioSpool.create(root,{sessionId:randomUUID(),...controller.getOwner(),startedAt:Date.now()});await spool.append({track:'remote',startMs:0,samples:Buffer.alloc(32)});
+ const api=controller.api;controller.api=async(owner,route,options)=>{if(route===`/interviews/${spool.id}/audio-ticket`)throw Object.assign(new Error('接口不存在'),{status:404});if(route===`/interviews/${spool.id}`)return {interview:{id:spool.id,status:'paused'}};return api(owner,route,options);};
+ await assert.rejects(controller.recover(spool.id),/接口/);await fs.access(spool.dir);assert.equal((await AudioSpool.open(root,spool.id)).pendingCount,1);
+});
+
+test('starting a retained local session deleted while offline cleans its404-confirmed cache',async t=>{
+ const {AudioSpool}=require('../lib/audio-spool.cjs');const {controller,root}=await setup(t);const spool=await AudioSpool.create(root,{sessionId:randomUUID(),...controller.getOwner(),startedAt:Date.now()});await spool.append({track:'remote',startMs:0,samples:Buffer.alloc(32)});
+ const api=controller.api;controller.api=async(owner,route,options)=>{if(route===`/interviews/${spool.id}`)throw Object.assign(new Error('记录不存在'),{status:404});return api(owner,route,options);};
+ await assert.rejects(controller.start({sessionId:spool.id}),/删除/);await assert.rejects(fs.access(spool.dir));assert.equal(controller.view().phase,'idle');
+});
