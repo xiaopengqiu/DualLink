@@ -15,7 +15,7 @@ function wave(pcm) {
 
 /** Bounded, independent queues for each recording track; ACK never waits for an HTTP request. */
 export function createHttpAsrFactory(config) {
-  return async function start({ track, model = config.model, hotwords = [], onResult = () => {}, onError = () => {}, onStatus = () => {} } = {}) {
+  return async function start({ track, model = config.model, hotwords = [], onResult = () => {}, onError = () => {}, onWarning = () => {}, onStatus = () => {} } = {}) {
     if (!config.configured) throw failure('ASR_NOT_CONFIGURED', '请在管理员账号设置中配置语音识别密钥和接口');
     if (!['remote', 'self'].includes(track)) throw failure('ASR_INVALID_TRACK', '未知音频轨道');
     if (!/^qwen-audio-\d+\.\d+-asr-flash$/.test(model)) throw failure('ASR_INVALID_CONFIG', '分段识别需要非实时模型，例如 qwen-audio-3.0-asr-flash');
@@ -37,7 +37,7 @@ export function createHttpAsrFactory(config) {
     async function recognize(chunk, segmentId) {
       const pcm = Buffer.concat(chunk.map(f => f.pcm)), startMs = chunk[0].startMs, duration = pcm.length / 32;
       const vocabulary = Object.fromEntries(hotwords.filter(w => typeof w === 'string' && w.trim() && w.length <= 80).slice(0, 200).map(w => [w.trim(), 4]));
-      const payload = { model, input: { messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: 'data:audio/wav;base64,' + wave(pcm).toString('base64') } }] }] }, parameters: { format: 'wav', sample_rate: 16000, language_hints: ['zh', 'en'], ...(Object.keys(vocabulary).length ? { vocabulary } : {}) } };
+      const payload = { model, input: { messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: 'data:audio/wav;base64,' + wave(pcm.length<16000?Buffer.concat([pcm,Buffer.alloc(16000-pcm.length)]):pcm).toString('base64') } }] }] }, parameters: { format: 'wav', sample_rate: 16000, language_hints: ['zh', 'en'], ...(Object.keys(vocabulary).length ? { vocabulary } : {}) } };
       let body;
       for (let attempt = 0; attempt < 2; attempt++) {
         if (root.signal.aborted) return;
@@ -45,9 +45,20 @@ export function createHttpAsrFactory(config) {
         try {
           const response = await fetch(url, { method: 'POST', redirect: 'error', signal: AbortSignal.any([root.signal, deadline]), headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
           if (!response.ok) {
-            await response.body?.cancel();
-            if ((response.status === 429 || response.status >= 500) && !attempt) { await delay(); continue; }
-            throw failure(response.status === 401 || response.status === 403 ? 'ASR_AUTH_FAILED' : 'ASR_UPSTREAM_FAILED', response.status === 401 || response.status === 403 ? '语音识别认证或模型权限不足，请管理员核对 Token Plan Key 与套餐额度' : `分段语音识别接口返回 HTTP ${response.status}，请检查模型、额度及接口地址`);
+            if ((response.status === 429 || response.status >= 500) && !attempt) { await response.body?.cancel(); await delay(); continue; }
+            let raw = '', errorBody;
+            if(response.body)for await(const data of response.body){raw+=Buffer.from(data).toString();if(raw.length>8192){raw=raw.slice(0,8192);break;}}
+            try { errorBody=JSON.parse(raw); } catch { /* Never echo raw vendor responses or request audio. */ }
+            // Token Plan returns an empty HTTP 400 for some unrecognizable audio, including silence.
+            // Preserve an explicit per-chunk gap without tearing down both recording tracks.
+            if(response.status===400 && config.tokenPlan && model==='qwen-audio-3.0-asr-flash' && (raw.trim()==='' || (errorBody && typeof errorBody==='object' && !Array.isArray(errorBody) && Object.keys(errorBody).length===0))) {
+              try { onWarning({code:'ASR_CHUNK_REJECTED',message:'此语音片段未能识别（接口返回空的 HTTP 400），录音已保留，后续录音继续处理',startMs,endMs:startMs+duration}); }
+              catch { throw failure('ASR_CALLBACK_FAILED','无法记录语音识别缺口，请检查服务器存储状态'); }
+              return;
+            }
+            const vendorCode=errorBody?.code||errorBody?.error?.code||errorBody?.error?.type;
+            const suffix=typeof vendorCode==='string'&&vendorCode!==config.apiKey&&!/^sk-/i.test(vendorCode)&&/^[A-Za-z0-9_.:-]{1,80}$/.test(vendorCode)?`（${vendorCode}）`:'';
+            throw failure(response.status === 401 || response.status === 403 ? 'ASR_AUTH_FAILED' : 'ASR_UPSTREAM_FAILED', response.status === 401 || response.status === 403 ? '语音识别认证或模型权限不足，请管理员核对 Token Plan Key 与套餐额度' : `分段语音识别接口返回 HTTP ${response.status}${suffix}，请检查模型、额度及接口地址`);
           }
           let size = 0, chunks = [];
           for await (const data of response.body) {

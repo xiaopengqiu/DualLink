@@ -94,7 +94,8 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
       await c.chain.catch(() => {});
       if (drain) {
         const results = await Promise.allSettled([...c.tasks.values()].map(task => task.finish()));
-        if (results.some(result => result.status === 'rejected')) reason ||= '语音识别尾句等待失败，记录可能存在缺口';
+        const rejected=results.find(result=>result.status==='rejected');
+        if(rejected)reason ||= rejected.reason?.message ? `语音识别尾段未完成：${rejected.reason.message}` : '语音识别尾句等待失败，记录可能存在缺口';
       }
       for (const task of c.tasks.values()) task.close();
       c.tasks.clear(); c.finalized=true; connections.delete(c.id);
@@ -146,7 +147,8 @@ export function attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFac
             const hotwords = JSON.parse(db.prepare('SELECT hotwords FROM interviews WHERE id=?').get(c.sessionId).hotwords);
             const starts = (c.asrEnabled?['remote', 'self']:[]).map(async track => {
               const task = await asrFactory({ track, sessionId: c.sessionId, mode: c.mode, hotwords,
-                onResult: result => { if (!c.finalized && (!c.stopping || c.finalizing)) recordSegment(c.sessionId, track, `${c.id}:${result.segmentId}`, result, c.mode === 'replay'); },
+                onResult: result => { if (!c.finalized && (!c.stopping || c.finalizing)) {recordSegment(c.sessionId, track, `${c.id}:${result.segmentId}`, result, c.mode === 'replay');if(c.asrWarning){c.asrWarning=false;status(c.sessionId,c.mode==='live'?'recording':'backfilling',null,c.mode);}} },
+                onWarning: warning => {if(!c.finalized){c.asrWarning=true;gap(c.sessionId,track,warning.startMs,warning.endMs,warning.message,{warning:true});}},
                 onError: error => { if (!c.stopping) { if(c.asrRequired)breakConnection(c,error?.message || '语音识别连接中断');else{c.tasks.get(track)?.close();c.tasks.delete(track);status(c.sessionId,'transcription_warning','后台转写中断，音频仍继续保存',c.mode);} } }
               });
               if (c.stopping) { task.close(); return; } c.tasks.set(track, task);

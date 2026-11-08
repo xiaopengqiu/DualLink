@@ -76,11 +76,11 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   const notifyInterview = id => { const row = getSession(id); if (row) event(id, { type: 'interview.updated', interview: interviewView(row) }); };
   const notifyAnswer = id => { const row = db.prepare('SELECT * FROM interview_answers WHERE id=?').get(id); if (row) event(row.session_id, { type: 'interview.answer', answer: answerView(row) }); };
   const notifyQuestion = id => { const row = db.prepare('SELECT * FROM interview_questions WHERE id=?').get(id); if (row) event(row.session_id, { type: 'interview.question', question: questionView(row) }); };
-  function gap(sessionId, track, startMs, endMs, reason) {
+  function gap(sessionId, track, startMs, endMs, reason, {warning=false}={}) {
     const interview = getSession(sessionId); if (!interview) return;
     const row = { id: randomUUID(), sessionId, track: track || null, startMs: startMs === null ? null : Math.round(startMs), endMs: endMs === null ? null : Math.round(endMs), reason: String(reason).slice(0, 300), status: 'unresolved', createdAt: now() };
     db.prepare('INSERT INTO interview_gaps(id,session_id,track,start_ms,end_ms,reason,status,created_at) VALUES(?,?,?,?,?,?,?,?)').run(row.id, sessionId, row.track, row.startMs, row.endMs, row.reason, row.status, row.createdAt);
-    event(sessionId, { type: 'interview.audio.status', status: 'interrupted', error: row.reason, gap: row });
+    event(sessionId, { type: 'interview.audio.status', status: warning?'transcription_warning':'interrupted', error: row.reason, gap: row });
   }
   function audioStatus(sessionId, value, error, mode) {
     if (!getSession(sessionId)) return;
@@ -376,6 +376,8 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     if(!['recording','paused'].includes(interview.status))fail(409,'本场面试已经结束，请选择已有问题重新生成');
     const recent=db.prepare('SELECT * FROM interview_triggers WHERE session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1').get(sessionId);
     if(recent&&recent.config_version===interview.config_version&&Date.now()-Date.parse(recent.created_at)<600)return resultFor(recent);
+    const tracks=db.prepare('SELECT track FROM interview_audio_frames WHERE session_id=? AND replay=0 AND active=1 GROUP BY track').all(sessionId).map(row=>row.track);
+    if(!tracks.includes('remote')&&tracks.includes('self'))fail(409,'未检测到远端/系统声音，目前只录到了本人麦克风。回答快捷键读取远端提问，请检查电脑的系统声音采集或播放对方音频后再试');
     let last=db.prepare("SELECT * FROM interview_questions WHERE session_id=? AND origin=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(sessionId,'trigger_'+interview.mode);
     let rangeStart,rangeEnd,captureEndMs,selectedSegments=[],truncated=false,questionText;
     if(interview.mode==='audio'){
@@ -426,7 +428,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   }
   router.post('/:id/trigger',route(async(req,res)=>{
     // Resolve ownership before entering a per-session serialized, bounded trigger queue.
-    const id=req.params.id;own(id,req.identity.userId);const depth=triggerDepths.get(id)||0;if(depth>=4)fail(429,'触发请求正在处理中，请稍后再按快捷键');triggerDepths.set(id,depth+1);const prior=triggerChains.get(id)||Promise.resolve();const next=prior.catch(()=>{}).then(()=>trigger(req));triggerChains.set(id,next);try{res.status(201).json(await next);}finally{const remaining=(triggerDepths.get(id)||1)-1;if(remaining)triggerDepths.set(id,remaining);else triggerDepths.delete(id);if(triggerChains.get(id)===next)triggerChains.delete(id);}
+    const id=req.params.id;own(id,req.identity.userId);const depth=triggerDepths.get(id)||0;if(depth>=4)fail(429,'触发请求正在处理中，请稍后再按快捷键');triggerDepths.set(id,depth+1);const prior=triggerChains.get(id)||Promise.resolve();const next=prior.catch(()=>{}).then(()=>trigger(req));triggerChains.set(id,next);event(id,{type:'interview.trigger.status',status:'processing'});try{const result=await next;event(id,{type:'interview.trigger.status',status:'queued'});res.status(201).json(result);}catch(error){event(id,{type:'interview.trigger.status',status:'failed',error:error.status&&error.status<500?error.message:'回答触发失败，请检查语音连接和服务端配置'});throw error;}finally{const remaining=(triggerDepths.get(id)||1)-1;if(remaining)triggerDepths.set(id,remaining);else triggerDepths.delete(id);if(triggerChains.get(id)===next)triggerChains.delete(id);}
   }));
   router.post('/:id/questions', (req,res) => {
     const row = own(req.params.id,req.identity.userId), result = createQuestion(row,req.body);

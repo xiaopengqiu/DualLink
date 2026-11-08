@@ -77,3 +77,16 @@ test('HTTP tail drain is bounded and invalid forced streaming models fail before
   const u=await upstream(t,()=>{});const task=await factory({...u,finishTimeoutMs:60})({track:'remote'});await task.write(pcm(),0);await assert.rejects(task.finish(),e=>e.code==='ASR_FINISH_TIMEOUT');task.close();
   await assert.rejects(factory(u)({track:'remote',model:'qwen-audio-3.1-asr-flash-streaming'}),e=>e.code==='ASR_INVALID_CONFIG');
 });
+
+test('Token Plan empty HTTP 400 records an unrecognized chunk and continues with later speech',async t=>{
+  const u=await upstream(t,(_req,res,_body,count)=>{if(count===1){res.writeHead(400);res.end('{}');}else res.end(JSON.stringify({text:'后续有效讲话'}));});
+  const warnings=[],errors=[],results=[],task=await factory(u)({track:'self',onWarning:w=>warnings.push(w),onError:e=>errors.push(e),onResult:r=>results.push(r)});
+  await task.write(pcm(),1000);await task.flush();assert.equal(warnings.length,1);assert.equal(warnings[0].startMs,1000);assert.equal(warnings[0].endMs,1100);assert.equal(errors.length,0);
+  const wav=Buffer.from(u.calls[0].body.input.messages[0].content[0].input_audio.data.split(',')[1],'base64');assert.equal(wav.length,16000+44);
+  await task.write(pcm(),1100);await task.finish();assert.equal(results[0].text,'后续有效讲话');assert.equal(results[0].endMs,1200);assert.equal(u.calls.length,2);task.close();
+});
+
+test('structured HTTP 400 remains fatal and exposes a safe vendor code, never raw error text',async t=>{
+  const u=await upstream(t,(_req,res)=>{res.writeHead(400);res.end(JSON.stringify({code:'InvalidParameter',message:'fixture-secret audio payload detail'}));});const warnings=[];
+  const task=await factory(u)({track:'remote',onWarning:w=>warnings.push(w)});await task.write(pcm(),0);await assert.rejects(task.finish(),e=>e.code==='ASR_UPSTREAM_FAILED'&&e.message.includes('InvalidParameter')&&!e.message.includes('fixture-secret'));assert.equal(warnings.length,0);task.close();
+});

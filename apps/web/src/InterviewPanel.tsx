@@ -155,6 +155,7 @@ export default function InterviewPanel({ isAdmin=false, ownerId, events, prompts
     }
     const eventSession = event.sessionId || event.interview?.id;
     if (eventSession !== selectedRef.current) return;
+    if(event.type==='interview.trigger.status'){setNotice({text:event.status==='failed'?event.error||'回答触发失败':event.status==='processing'?'已收到回答请求，正在同步语音并识别当前问题…':'问题已提交，正在生成回答',error:event.status==='failed'});return;}
     setDetail(current => applyInterviewEvent(current, event));
     if (event.type === 'interview.question' && event.question && followQuestionRef.current) setQuestionId(event.question.id);
   }), [ownerId, events, refreshList, refreshDetail, request, report]);
@@ -187,7 +188,8 @@ export default function InterviewPanel({ isAdmin=false, ownerId, events, prompts
   const selectedText = detail.segments.filter(item => selectedSegments.includes(item.id)).map(item => item.text).join('\n');
   const recorder = devices.find(device => device.id === active?.deviceId);
   const hasRecording = interviews.some(item => item.status === 'recording');
-  const audioErrors = Object.values(detail.audioStatus).map(item => item.error).filter(Boolean);
+  const audioWarnings = Object.values(detail.audioStatus).filter(item=>item.status==='transcription_warning').map(item=>item.error).filter(Boolean);
+  const audioErrors = Object.values(detail.audioStatus).filter(item=>item.status!=='transcription_warning').map(item => item.error).filter(Boolean);
   const audioReady = [active?.recordingStatus, ...Object.values(detail.audioStatus).map(item => item.status)].some(status => status && ['ready', 'streaming', 'recording', 'connected'].includes(status));
   const answerContext = latestAnswer?.contextSummary || (detail.contextSummary?.id === latestAnswer?.contextSnapshotId ? detail.contextSummary : null);
   const interviewProviders = config?.providers || providers;
@@ -256,6 +258,8 @@ export default function InterviewPanel({ isAdmin=false, ownerId, events, prompts
   return <div className="interview-workspace">
     <div className="page-heading"><div><div className="eyebrow">LISTEN. REMEMBER. RESPOND.</div><h1>每一轮对话，都有上下文<span>。</span></h1><p>电脑持续收听，由你触发回答；音频直答与转写回答自由选择。</p></div><button className="button primary" disabled={!(config?.configured||config?.audioConfigured) || hasRecording} title={hasRecording ? '请先结束当前进行中的面试' : undefined} onClick={() => setShowCreate(value => !value)}><Plus size={17} />创建面试会话</button></div>
     {config?.asrTransport==='http'&&<div className="interview-notice"><AudioLines size={17}/><span>当前使用 HTTP 分段转写（最长 {config.asrChunkSeconds||4} 秒），短暂停顿后更新字幕；点击回答或按快捷键会先识别尚未提交的语音。</span></div>}
+    {active&&detail.segments.some(s=>s.track==='self')&&!detail.segments.some(s=>s.track==='remote')&&<div className="interview-notice"><Monitor size={17}/><span>已收到本人麦克风转写，尚未收到远端提问。回答快捷键使用远端/系统声音；测试时请播放对方声音，并在电脑客户端的录音预检中确认两路电平均有变化。</span></div>}
+    {audioWarnings.length>0&&<div className="interview-notice"><AudioLines size={17}/><span>{audioWarnings[0]}</span></div>}
     {notice && <div className={`interview-notice ${notice.error ? 'is-error' : ''}`} role={notice.error ? 'alert' : 'status'}><span>{notice.text}</span><button className="icon-button" aria-label="关闭面试提示" onClick={() => setNotice(null)}><X size={15} /></button></div>}
     {config && !config.configured && (!active || !nativeWithoutTranscript) && <div className="interview-notice asr-missing"><span className="round-icon"><Mic size={19} /></span><div><strong>语音识别尚未配置</strong><p>请管理员在服务器配置百炼 API Key、业务空间和地域。转写模式录音需完成此配置；音频直答可使用单独配置的音频模型。已有记录仍可查看、导出。</p></div></div>}
     {isAdmin&&<details className="panel interview-preferences"><summary><Sparkles size={15}/>默认面试配置<ChevronDown size={14}/></summary><form onSubmit={event=>{event.preventDefault();void perform('preferences',async()=>{const result=await request<{preferences:InterviewPreferences}>('/interviews/preferences',{method:'PATCH',body:preferences});const next=interviewPreferences(config||{},result.preferences);setPreferences(next);setDraft(current=>({...current,...next,autoAnswer:false}));setNotice({text:'默认配置已保存，新会话和电脑客户端可使用此配置',error:false});});}}><div className="interview-mode-grid"><ModeOptions value={preferences} onChange={changes=>setPreferences(current=>({...current,...changes}))} prefix="默认" models={audioModels} providers={interviewProviders} config={config} showBoth/></div><div className="interview-preferences-footer"><span>与截图配置分别保存。语音识别与直接音频回答使用百炼 API；文字回答的 Codex、Claude 模型各自保留。默认手动触发。</span><button className="button primary compact" disabled={busy==='preferences'}>保存默认配置</button></div></form></details>}

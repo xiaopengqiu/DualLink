@@ -385,3 +385,28 @@ test('HTTP ASR recording remains client-compatible, flushes on trigger and drain
   const pause=await s.api(`/interviews/${session.id}/pause`,a,'POST',{});assert.equal(pause.status,200);
   const detail=await(await s.api(`/interviews/${session.id}`,a)).json();assert.equal(requests,2);assert(detail.segments.some(x=>x.track==='remote'&&x.text.includes('Redis')&&x.startMs===0));assert(detail.segments.some(x=>x.track==='self'&&x.text==='本人经历。'&&x.startMs===1000));assert.equal(detail.gaps.length,0);
 });
+
+test('microphone-only audio gives an actionable answer-trigger error and broadcasts it to the owner',async t=>{
+  const s=await setup(t),a=await s.login(),device=await s.pair(a),session=await s.create(device,{autoAnswer:false});
+  const {socket}=await s.audio(session,device);const b=frame(1,0,0);for(let i=16;i<b.length;i+=2)b.writeInt16LE(1000,i);const ack=next(socket,'audio.ack');socket.send(b);await ack;
+  const result=await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:randomUUID()});assert.equal(result.status,409);assert.match((await result.json()).error,/只录到了本人麦克风/);
+  assert.equal(s.db.prepare('SELECT count(*) AS n FROM interview_answers WHERE session_id=?').get(session.id).n,0);socket.close();
+});
+
+test('tail drain failure preserves the real ASR error instead of replacing it with a generic banner',async t=>{
+  const s=await setup(t,{asrFactory:async()=>({async write(){},async finish(){throw new Error('识别接口权限不足 fixture');},close(){}})}),a=await s.login(),device=await s.pair(a),session=await s.create(device,{autoAnswer:false});
+  await s.audio(session,device);const response=await s.api(`/interviews/${session.id}/pause`,a,'POST',{});assert.equal(response.status,200);
+  const detail=await(await s.api(`/interviews/${session.id}`,a)).json();assert(detail.gaps.some(g=>g.reason.includes('识别接口权限不足 fixture')));
+});
+
+test('one rejected HTTP audio chunk marks its track gap while both recording tracks and answering stay available',async t=>{
+  const {createServer}=await import('node:http');let requests=0;
+  const upstream=createServer(async(req,res)=>{for await(const _ of req){}requests++;res.setHeader('content-type','application/json');if(requests===1){res.writeHead(400);res.end('{}');}else res.end(JSON.stringify({text:'请解释缓存。'}));});
+  await new Promise(r=>upstream.listen(0,'127.0.0.1',r));t.after(async()=>{upstream.closeAllConnections();await new Promise(r=>upstream.close(r));});
+  const s=await setup(t,{asrFactory:undefined,asr:{transport:'token-plan',apiKey:'fixture',chunkSeconds:2,model:'qwen-audio-3.0-asr-flash',httpUrl:`http://127.0.0.1:${upstream.address().port}/asr`}}),a=await s.login(),device=await s.pair(a),session=await s.create(device,{autoAnswer:false}),{socket}=await s.audio(session,device);
+  for(let seq=0;seq<20;seq++){const b=frame(1,seq,seq*100);for(let i=16;i<b.length;i+=2)b.writeInt16LE(1000,i);const ack=next(socket,'audio.ack');socket.send(b);await ack;}
+  await waitFor(()=>s.db.prepare('SELECT id FROM interview_gaps WHERE session_id=?').get(session.id));assert.equal(socket.readyState,WebSocket.OPEN);assert.equal(s.db.prepare('SELECT status FROM interviews WHERE id=?').get(session.id).status,'recording');
+  const b=frame(0,0,0);for(let i=16;i<b.length;i+=2)b.writeInt16LE(1000,i);const ack=next(socket,'audio.ack');socket.send(b);await ack;
+  const result=await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:randomUUID()});assert.equal(result.status,201);assert.match((await result.json()).question.text,/缓存/);
+  const gap=s.db.prepare('SELECT track,reason FROM interview_gaps WHERE session_id=?').get(session.id);assert.equal(gap.track,'self');assert.match(gap.reason,/后续录音继续/);await s.api(`/interviews/${session.id}/pause`,a,'POST',{});
+});
