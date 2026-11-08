@@ -16,6 +16,7 @@ const service = await createApp({
     runnerImage: process.env.AI_RUNNER_IMAGE || 'dual-link-ai:1.0.0',
     timeoutMs: Number(process.env.AI_TIMEOUT_MS) || 180000,
     codexLoadUserConfig: process.env.CODEX_LOAD_USER_CONFIG === 'true',
+    claudeLoadUserConfig: process.env.CLAUDE_LOAD_USER_CONFIG === 'true',
     claudeSafeMode: process.env.CLAUDE_SAFE_MODE !== 'false', claudeBare: (process.env.CLAUDE_BARE_MODE || process.env.CLAUDE_BARE) === 'true',
   },
 });

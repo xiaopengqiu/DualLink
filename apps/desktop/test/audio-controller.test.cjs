@@ -17,6 +17,13 @@ test('audio controller streams durable dual-track PCM and keeps sequence across 
   assert.equal(frames.length,3);assert.equal(frames[2].readUInt32BE(4),1);assert.equal(frames[2].readUInt32BE(8),900);assert.equal(controller.view().phase,'ended');
 });
 test('missing ASR configuration fails before creating a recording or claiming success',async t=>{const {controller,creates}=await setup(t,{configured:false});await assert.rejects(controller.start({}),/未配置|密钥/);assert.equal(creates(),0);});
+
+test('new desktop interviews pass per-provider text models and independent ASR model',async t=>{
+ const {controller,calls}=await setup(t,{defaults:{textModels:{codex:'default-codex',claude:'default-claude'},asrModel:'default-asr'}});
+ await controller.start({provider:'claude',textModels:{codex:'quality',claude:'flash'},asrModel:'custom-asr'});
+ const body=calls.find(c=>c.route==='/interviews').body;
+ assert.deepEqual(body.textModels,{codex:'quality',claude:'flash'});assert.equal(body.asrModel,'custom-asr');
+});
 test('revocation stops recording and a stale frame cannot cross into a different pairing',async t=>{
   const {controller,frames,setOwner}=await setup(t);const control=await controller.start({});controller.markStarted(control.token);await controller.ingest({token:control.token,track:'remote',startMs:0,samples:Buffer.alloc(3200)});
   await controller.reset({removeLocal:true});setOwner({deviceId:'device-B',cloudUrl:'https://other.example',secret:'other'});await controller.ingest({token:control.token,track:'self',startMs:100,samples:Buffer.alloc(3200)});

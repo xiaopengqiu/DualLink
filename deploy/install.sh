@@ -69,10 +69,12 @@ CODEX_HOME=/var/lib/dual-link/.codex
 CLAUDE_CONFIG_DIR=/var/lib/dual-link/.claude
 CODEX_LOAD_USER_CONFIG=false
 CLAUDE_SAFE_MODE=true
+CLAUDE_LOAD_USER_CONFIG=false
 AI_RUNNER_IMAGE=dual-link-ai:1.0.0
 # Optional server-only settings for a Claude-compatible third-party provider.
 # ANTHROPIC_AUTH_TOKEN=
 # ANTHROPIC_BASE_URL=
+# ANTHROPIC_MODEL=
 # ANTHROPIC_DEFAULT_HAIKU_MODEL=
 # ANTHROPIC_DEFAULT_SONNET_MODEL=
 # ANTHROPIC_DEFAULT_OPUS_MODEL=

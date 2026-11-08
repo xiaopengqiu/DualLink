@@ -248,6 +248,7 @@ export class RealtimeClient {
     form.append('image', blob, metadata.name); form.append('captureId', metadata.captureId);
     form.append('deviceId', metadata.deviceId); form.append('analyze', String(shouldAnalyze(metadata, this.callbacks.autoAnalyze())));
     if (metadata.provider) form.append('provider', metadata.provider);
+    if (typeof metadata.model === 'string') form.append('model', metadata.model);
     if (metadata.promptId) form.append('promptId', metadata.promptId);
     const result = await api.request<CaptureResult>('/captures', { method: 'POST', body: form, signal: this.abort.signal });
     if (!this.disposed) this.callbacks.onUploaded(result);

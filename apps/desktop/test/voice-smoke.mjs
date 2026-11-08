@@ -17,7 +17,7 @@ try{
   simulated.audio={phase:'idle',recoveries:[],interviews:[],config:{configured:false,audioConfigured:true,audioModels:['qwen-test'],defaults:{mode:'audio',provider:'claude',transcribe:false,audioModel:'qwen-test',audioWindowSeconds:75}}};
   await application.evaluate(({BrowserWindow},state)=>BrowserWindow.getAllWindows()[0].webContents.send('state',state),simulated);
   await expect(page.getByLabel('回答模式',{exact:true})).toHaveValue('audio');
-  await expect(page.getByLabel('音频理解模型',{exact:true})).toHaveValue('qwen-test');
+  await expect(page.getByLabel('音频理解模型（百炼 API）',{exact:true})).toHaveValue('qwen-test');
   await expect(page.locator('#voice-transcribe')).not.toBeChecked();
   await expect(page.getByRole('button',{name:'开始面试录音',exact:true})).toBeEnabled();
   await expect(page.locator('#voice-auto-answer')).not.toBeChecked();

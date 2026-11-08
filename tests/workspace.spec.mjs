@@ -72,3 +72,25 @@ test('an in-flight task can be cancelled and the website safely renders model ma
   await page.getByRole('button', { name: '取消任务' }).click();
   await expect(page.getByRole('heading', { name: '任务已取消' })).toBeVisible();
 });
+
+test('screenshot CLI model defaults persist independently and tasks retain the chosen model',async({page})=>{
+  await login(page);
+  await page.locator('.screenshot-preferences summary').click();
+  await page.getByLabel('Codex 截图模型 ID',{exact:true}).fill('quality-codex');
+  await page.getByLabel('Claude 截图模型 ID',{exact:true}).fill('quality-claude');
+  await page.getByLabel('截图默认执行方式').selectOption('claude');
+  await page.getByRole('button',{name:'保存截图默认配置',exact:true}).click();
+  await expect(page.getByText('截图默认配置已保存，不影响面试模型配置',{exact:true})).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('combobox',{name:'截图执行方式',exact:true})).toHaveValue('claude');
+  await expect(page.getByLabel('截图本次模型 ID')).toHaveValue('quality-claude');
+  await page.getByRole('combobox',{name:'截图执行方式',exact:true}).selectOption('codex');
+  await expect(page.getByLabel('截图本次模型 ID')).toHaveValue('quality-codex');
+  await page.getByRole('combobox',{name:'截图执行方式',exact:true}).selectOption('claude');
+  await page.getByLabel('接收图片后自动分析').check();
+  await page.getByLabel('选择截图文件').setInputFiles({name:'models.png',mimeType:'image/png',buffer:png});
+  await expect(page.getByRole('region',{name:'AI 回答'}).locator('.model-label')).toContainText('quality-claude');
+  const {tasks}=await(await page.request.get('/api/tasks')).json();
+  expect(tasks[0].provider).toBe('claude');expect(tasks[0].model).toBe('quality-claude');
+  await expect(page.getByRole('region',{name:'AI 回答'}).getByText('已完成',{exact:true})).toBeVisible();
+});

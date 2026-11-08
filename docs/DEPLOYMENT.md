@@ -19,7 +19,7 @@ docker version
 
 ## 2. 上传源码并安装
 
-上传 `release/DualLink-source-1.2.0.zip`，解压到临时目录，在源码根目录运行：
+上传 `release/DualLink-source-1.3.1.zip`，解压到临时目录，在源码根目录运行：
 
 ```bash
 sudo bash deploy/install.sh assistant.example.com docker
@@ -83,20 +83,9 @@ sudo -u duallink -H /usr/local/bin/claude auth login
 
 认证过程按 CLI 提示操作。也可以直接使用环境变量提供的 API 凭据，无需交互登录。Claude 默认使用安全模式并关闭内建工具和 MCP；旧版本不认识参数时应升级。任务镜像锁定 Codex `0.167.0`、Claude Code `2.1.319`。
 
-如果已安装的 Claude CLI 使用 Claude 兼容的第三方服务，可以在 `/etc/dual-link.env` 复用同一组服务端环境变量，无需再次执行 Anthropic OAuth：
+Claude CLI 已连接兼容的第三方供应商时，优先把它实际依赖的服务端变量写入 `/etc/dual-link.env`：`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、可选的 `ANTHROPIC_MODEL` 及 `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `SONNET` / `OPUS` 映射。不要打印真实值，也不要提交环境文件。`CLAUDE_MODEL` 或账号/会话选择的模型会作为 `--model` 显式覆盖供应商默认映射；留空才使用 CLI 默认。
 
-```ini
-# 以下均只配置在服务器；不要提交真实值。
-ANTHROPIC_AUTH_TOKEN=YOUR_PROVIDER_TOKEN
-ANTHROPIC_BASE_URL=https://YOUR_PROVIDER_ENDPOINT
-ANTHROPIC_DEFAULT_HAIKU_MODEL=YOUR_HAIKU_ALIAS
-ANTHROPIC_DEFAULT_SONNET_MODEL=YOUR_SONNET_ALIAS
-ANTHROPIC_DEFAULT_OPUS_MODEL=YOUR_OPUS_ALIAS
-```
-
-只复制这组必要环境变量，不要复制整套 Claude settings，也不要为读取个人家目录而放宽 systemd 的 `ProtectHome`。Dual Link 不传递 `CLAUDE_CODE_SUBAGENT_MODEL`，以免受控问答间接启用另一模型。`CLAUDE_MODEL` 非空时会通过 `--model` 显式覆盖 CLI 的默认/别名选择；留空则由上述第三方模型映射和 CLI 默认值决定。此路径保持 `--setting-sources ''`、空工具列表、严格空 MCP、无会话持久化和安全模式；项目验证的 Claude Code `2.1.319` 与这些参数兼容。
-
-验证时仅检查变量是否存在，不要把 token 打印到终端或日志。先用 `sudo systemctl show dual-link --property=EnvironmentFiles` 等方式确认服务读取了环境文件，再以 `duallink` 身份发起一次真实的纯文本请求；只有真实请求成功才能同时证明端点、token 和模型别名有效。环境文件中的“已填写”状态本身不能证明供应商请求可用。
+默认 `CLAUDE_LOAD_USER_CONFIG=false`，因此不会加载项目设置。确需复用经过审查的服务账号 Claude 用户设置时才改为 `true`；只复制必要配置到 `/var/lib/dual-link/.claude`，不要挂载完整个人家目录、不要放宽 `ProtectHome`，也不要传入 `CLAUDE_CODE_SUBAGENT_MODEL`。任务仍使用空工具、严格空 MCP、无会话持久化和安全模式。变量存在只说明配置已读取，最终必须以 `duallink` 身份发起一次真实纯文本请求，才能验证端点、认证和模型名均有效。
 
 `CODEX_LOAD_USER_CONFIG=false` 默认忽略用户自定义 Codex 配置和规则，只执行受控问答。若你依赖已有配置中的自定义提供方，可显式设为 `true`，并审查所加载配置；API 基址等环境配置也必须在服务账号下验证。模型名称可用 `CODEX_MODEL` / `CLAUDE_MODEL` 指定，留空使用 CLI 默认。
 

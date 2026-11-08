@@ -12,6 +12,31 @@ function waitFor(fn, timeout = 3000) { return new Promise((resolve, reject) => {
 function next(socket, type) { return new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error('missing '+type)); }, 4000); const message = bytes => { const e = JSON.parse(bytes.toString()); if (e.type === type) { cleanup(); resolve(e); } }; const close = () => { cleanup(); reject(new Error('socket closed before '+type)); }; function cleanup() { clearTimeout(timer); socket.off('message', message); socket.off('close', close); } socket.on('message', message); socket.on('close', close); }); }
 function frame(track = 0, seq = 0, start = 0, replay = false) { const buffer = Buffer.alloc(3216); buffer[0] = 1; buffer[1] = track; buffer.writeUInt16BE(replay ? 1 : 0, 2); buffer.writeUInt32BE(seq, 4); buffer.writeUInt32BE(start, 8); buffer.writeUInt32BE(1600, 12); return buffer; }
 
+test('scenario models select ASR per session and text model per provider while preserving queued snapshots',async t=>{
+  const calls=[];const s=await setup(t,{textRunner:async input=>{calls.push(input);return {answer:'fast answer'};}});const a=await s.login(),b=await s.login('b@example.com'),device=await s.pair(a);
+  const prefs={textModels:{codex:'codex-fast',claude:'qwen-flash',bailian:'qwen-flash'},asrModel:'qwen-audio-3.0-asr-flash-streaming',provider:'claude'};
+  assert.equal((await s.api('/interviews/preferences',a,'PATCH',prefs)).status,200);
+  assert.equal((await (await s.api('/interviews/preferences',b)).json()).preferences.textModels.claude,'');
+  const interview=await s.create(device);assert.deepEqual(interview.textModels,prefs.textModels);assert.equal(interview.asrModel,prefs.asrModel);
+  const {socket}=await s.audio(interview,device);assert.equal(s.asrTasks[0].model,prefs.asrModel);
+  assert.equal((await s.api(`/interviews/${interview.id}`,a,'PATCH',{textModels:{claude:'different-fast'}})).status,409);
+  assert.equal((await s.api(`/interviews/${interview.id}`,a,'PATCH',{provider:'codex'})).status,409);
+  assert.equal((await s.api(`/interviews/${interview.id}/questions`,a,'POST',{text:'请解释缓存'})).status,201);
+  await waitFor(()=>calls.length);assert.equal(calls[0].provider,'claude');assert.equal(calls[0].model,'qwen-flash');
+  const detail=await (await s.api(`/interviews/${interview.id}`,a)).json();assert.equal(detail.answers[0].model,'qwen-flash');
+  assert.equal((await s.api(`/interviews/${interview.id}/pause`,a,'POST',{})).status,200);
+  const changed=await s.api(`/interviews/${interview.id}`,a,'PATCH',{provider:'codex',textModels:{claude:'different-fast'},asrModel:'qwen-audio-3.1-asr-flash-streaming'});assert.equal(changed.status,200);
+  const newView=(await changed.json()).interview;assert.equal(newView.provider,'codex');assert.equal(newView.textModels.codex,'codex-fast');assert.equal(newView.textModels.claude,'different-fast');
+  socket.close();
+});
+
+test('empty audio model selection resolves the server default for preferences and paused sessions',async t=>{
+  const s=await setup(t,{omni:{model:'qwen3.8-omni-flash-realtime',models:['qwen3.8-omni-flash-realtime']}});const a=await s.login();
+  const saved=await s.api('/interviews/preferences',a,'PATCH',{audioModel:''});assert.equal(saved.status,200);assert.equal((await saved.json()).preferences.audioModel,'qwen3.8-omni-flash-realtime');
+  const interview=await s.create(a);await s.api(`/interviews/${interview.id}/pause`,a,'POST',{});
+  const changed=await s.api(`/interviews/${interview.id}`,a,'PATCH',{audioModel:''});assert.equal(changed.status,200);assert.equal((await changed.json()).interview.audioModel,'qwen3.8-omni-flash-realtime');
+});
+
 async function setup(t, overrides = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'dual-interviews-'));
   const asrTasks = [], prompts = [], extraServices=[];

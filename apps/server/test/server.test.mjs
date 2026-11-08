@@ -14,6 +14,19 @@ import WebSocket from 'ws';
 import { extractKnowledge, selectSources } from '../src/knowledge.mjs';
 
 const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF9sAAAAASUVORK5CYII=', 'base64');
+
+test('scenario screenshot preferences isolate accounts and snapshot provider-specific model into queued work', async t => {
+  const calls=[];const s=await setup(t,{runner:async input=>{calls.push(input);return {answer:'ok'};}});
+  const a=await s.login(),b=await s.login('other@example.com');
+  const prefs={screenshot:{provider:'claude',models:{codex:'high-quality-codex',claude:'qwen-max'}}};
+  const save=await s.api('/model-preferences',a,'PUT',{preferences:prefs});assert.equal(save.status,200);assert.deepEqual((await save.json()).preferences,prefs);
+  assert.equal((await (await s.api('/model-preferences',b)).json()).preferences.screenshot.models.claude,'');
+  const bad=await s.api('/model-preferences',a,'PUT',{preferences:{screenshot:{models:{claude:'--inject config'}}}});assert.equal(bad.status,400);
+  const form=new FormData();form.set('captureId',randomUUID());form.set('image',new Blob([pixel],{type:'image/png'}),'test.png');
+  const upload=await s.api('/captures',a,'POST',form);assert.equal(upload.status,201);const {task}=await upload.json();assert.equal(task.provider,'claude');assert.equal(task.model,'qwen-max');
+  await s.api('/model-preferences',a,'PUT',{preferences:{screenshot:{models:{claude:'qwen-flash'}}}});
+  await s.worker.tick();await s.worker.idle();assert.equal(calls[0].model,'qwen-max');assert.equal(calls[0].provider,'claude');
+});
 async function setup(t, opts = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'dual-link-test-'));
   const svc = await createApp({ dataDir, secureCookies: false, startWorker: false, ...opts });

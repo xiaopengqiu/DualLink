@@ -7,6 +7,7 @@ readline.createInterface({input:process.stdin}).on('line',raw=>{
  const msg=JSON.parse(raw);
  if(msg.method==='initialize') emit({id:msg.id,result:{userAgent:'fixture'}});
  else if(msg.method==='thread/start') {
+   if(process.env.FIXTURE_MODELS_JOURNAL)appendFileSync(process.env.FIXTURE_MODELS_JOURNAL,JSON.stringify(msg.params.model||null)+'\n');
    if(subscribed.size){emit({id:msg.id,error:{message:'previous ephemeral thread not released'}});return;}
    if(!msg.params.ephemeral || msg.params.sandbox!=='read-only') {emit({id:msg.id,error:{message:'unsafe thread'}});return;}
    const id=`thread-${++count}`;subscribed.add(id);emit({id:msg.id,result:{thread:{id}}});

@@ -16,6 +16,7 @@ import { attachRealtime } from './realtime.mjs';
 import { createWorker } from './worker.mjs';
 import { diagnose } from './diagnostics.mjs';
 import { createInterviewService } from './interviews.mjs';
+import { modelId, modelMap, defaultTextModel } from './model-settings.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const imageMax = 12 * 1024 * 1024;
@@ -65,10 +66,11 @@ export async function createApp(options = {}) {
   const protectedRouter = express.Router(); protectedRouter.use(requireAuth, csrf);
   const adminOnly = (req, res, next) => { if (req.identity?.kind !== 'web' || req.identity.role !== 'admin') return next(Object.assign(new Error('需要管理员权限'), { status: 403 })); next(); };
   const userRow = id => db.prepare('SELECT * FROM users WHERE id=?').get(id);
+  const screenshotPreferences = uid => ({ provider: defaultProvider, models: {codex:'',claude:''}, ...jsonParse(db.prepare('SELECT value FROM model_preferences WHERE user_id=?').get(uid)?.value,{}) });
   const owned = (table, id, userId) => { const r = db.prepare(`SELECT * FROM ${table} WHERE id=? AND user_id=?`).get(id, userId); if (!r) fail(404, '记录不存在'); return r; };
   const promptView = p => ({ id: p.id, name: p.name, content: p.content, isDefault: !!p.is_default, version: p.version, createdAt: p.created_at, updatedAt: p.updated_at });
   const knowledgeView = k => ({ id: k.id, name: k.name, size: k.size, status: k.status, error: k.error, characters: k.text.length, createdAt: k.created_at });
-  const taskView = t => ({ id: t.id, captureId: t.capture_id, provider: t.provider, status: t.status, stage: t.stage, answer: t.answer, error: t.error, retrievalWarning: t.retrieval_warning || null, question: t.question, promptName: t.prompt_name, createdAt: t.created_at, updatedAt: t.updated_at, sources: jsonParse(t.sources, []), usage: jsonParse(t.usage, undefined) });
+  const taskView = t => ({ id: t.id, captureId: t.capture_id, provider: t.provider, model:t.model || null, status: t.status, stage: t.stage, answer: t.answer, error: t.error, retrievalWarning: t.retrieval_warning || null, question: t.question, promptName: t.prompt_name, createdAt: t.created_at, updatedAt: t.updated_at, sources: jsonParse(t.sources, []), usage: jsonParse(t.usage, undefined) });
   let realtime;
   const deviceView = d => ({ id: d.id, name: d.name, createdAt: d.created_at, lastSeenAt: d.last_seen_at, online: realtime?.isOnline(d.id) || false });
   const devicesFor = userId => db.prepare('SELECT * FROM devices WHERE user_id=? ORDER BY created_at DESC').all(userId).map(deviceView);
@@ -80,7 +82,7 @@ export async function createApp(options = {}) {
   const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, audioRunner: options.audioRunner, omni: options.omni, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews });
   protectedRouter.use('/interviews', interviews.router);
 
-  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.2.0' }));
+  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.3.1' }));
   const loginLimit = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: '登录尝试过多，请 15 分钟后重试' } });
   app.post('/api/auth/login', loginLimit, asyncRoute(async (req, res) => {
     const email = typeof req.body.email === 'string' ? req.body.email.toLowerCase().trim() : '';
@@ -119,7 +121,17 @@ export async function createApp(options = {}) {
     db.transaction(() => { db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(encoded, u.id); db.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>?').run(u.id, req.identity.tokenHash); })();
     res.json({ ok: true });
   }));
-  protectedRouter.get('/config', (req, res) => res.json({ providers: ['codex', 'claude'], defaultProvider, autoAnalyze: !!userRow(req.identity.userId).auto_analyze, iceServers: options.iceServers || (process.env.STUN_URL ? [{ urls: process.env.STUN_URL }] : []), maxUploadBytes: imageMax }));
+  protectedRouter.get('/config', (req, res) => res.json({ providers: ['codex', 'claude'], defaultProvider, screenshotPreferences:screenshotPreferences(req.identity.userId), autoAnalyze: !!userRow(req.identity.userId).auto_analyze, iceServers: options.iceServers || (process.env.STUN_URL ? [{ urls: process.env.STUN_URL }] : []), maxUploadBytes: imageMax }));
+  protectedRouter.get('/model-preferences',(req,res)=>res.json({preferences:{screenshot:screenshotPreferences(req.identity.userId)}}));
+  protectedRouter.put('/model-preferences',browserOnly,(req,res)=>{
+    const body=req.body.preferences ?? req.body;
+    if(!body || typeof body!=='object' || Array.isArray(body) || !body.screenshot || typeof body.screenshot!=='object' || Array.isArray(body.screenshot))fail(400,'截图模型配置无效');
+    const current=screenshotPreferences(req.identity.userId), input=body.screenshot;
+    const provider=input.provider===undefined?current.provider:input.provider;if(!['codex','claude'].includes(provider))fail(400,'截图执行方式无效');
+    const value={provider,models:input.models===undefined?current.models:modelMap(input.models,current.models,['codex','claude'])};
+    db.prepare('INSERT INTO model_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(req.identity.userId,JSON.stringify(value));
+    res.json({preferences:{screenshot:value}});
+  });
   protectedRouter.put('/settings', browserOnly, (req, res) => {
     if (typeof req.body.autoAnalyze !== 'boolean') fail(400, 'autoAnalyze 必须为布尔值');
     db.prepare('UPDATE users SET auto_analyze=? WHERE id=?').run(req.body.autoAnalyze ? 1 : 0, req.identity.userId);
@@ -128,7 +140,7 @@ export async function createApp(options = {}) {
   protectedRouter.get('/device/me', (req, res) => {
     if (req.identity.kind !== 'device') return res.status(401).json({ error: '需要设备凭证' });
     const u = userRow(req.identity.userId); const p = db.prepare('SELECT id FROM prompts WHERE user_id=? AND is_default=1').get(u.id);
-    res.json({ device: deviceView(req.identity.device), user: { id: u.id, name: u.name }, settings: { defaultProvider, defaultPromptId: p?.id || null, autoAnalyze: !!u.auto_analyze } });
+    res.json({ device: deviceView(req.identity.device), user: { id: u.id, name: u.name }, settings: { defaultProvider, screenshotPreferences:screenshotPreferences(u.id), defaultPromptId: p?.id || null, autoAnalyze: !!u.auto_analyze } });
   });
   protectedRouter.delete('/device/me', (req, res) => {
     if (req.identity.kind !== 'device') return res.status(401).json({ error: '需要设备凭证' });
@@ -231,7 +243,9 @@ export async function createApp(options = {}) {
       const u = userRow(uid); const today = new Date().toISOString().slice(0, 10);
       if (db.prepare('SELECT count(*) AS n FROM quota_events WHERE user_id=? AND created_at>=?').get(uid, today).n >= u.daily_limit) fail(429, '已达到今日任务额度');
       if (db.prepare("SELECT count(*) AS n FROM tasks WHERE user_id=? AND status IN ('queued','running')").get(uid).n >= 5) fail(429, '待处理任务过多，请稍后再试');
-      const provider = input.provider || defaultProvider; if (!['codex', 'claude'].includes(provider)) fail(400, '模型服务不受支持');
+      const preferences=screenshotPreferences(uid);
+      const provider = input.provider || preferences.provider; if (!['codex', 'claude'].includes(provider)) fail(400, '模型服务不受支持');
+      const model = input.model===undefined ? preferences.models[provider] || defaultTextModel(provider,options.cli) : modelId(input.model) || defaultTextModel(provider,options.cli);
       let prompt = input.promptId ? owned('prompts', input.promptId, uid) : db.prepare('SELECT * FROM prompts WHERE user_id=? ORDER BY is_default DESC,created_at LIMIT 1').get(uid);
       if (!prompt) prompt = { name: '默认风格', content: '请用中文准确回答截图中的问题。' };
       const question = input.question === undefined ? '' : text(input.question, '补充问题', 8000, false);
@@ -240,6 +254,7 @@ export async function createApp(options = {}) {
       const id = randomUUID(), timestamp = now();
       db.prepare("INSERT INTO tasks(id,user_id,capture_id,provider,status,question,prompt_name,prompt_snapshot,sources,created_at,updated_at) VALUES(?,?,?,?,'queued',?,?,?,?,?,?)").run(id, uid, captureId, provider, question, prompt.name, buildPrompt(prompt.content, question, sources), JSON.stringify(sources), timestamp, timestamp);
       db.prepare('UPDATE tasks SET style_snapshot=?,knowledge_ids=?,needs_retrieval=? WHERE id=?').run(prompt.content, JSON.stringify(files.map(f => f.id)), files.reduce((total, f) => total + f.text.length, 0) > 14000 ? 1 : 0, id);
+      db.prepare('UPDATE tasks SET model=? WHERE id=?').run(model||null,id);
       db.prepare('INSERT INTO quota_events(id,user_id,created_at) VALUES(?,?,?)').run(randomUUID(), uid, timestamp);
       return taskView(db.prepare('SELECT * FROM tasks WHERE id=?').get(id));
     })();

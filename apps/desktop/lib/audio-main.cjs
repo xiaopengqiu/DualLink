@@ -36,7 +36,7 @@ class AudioController {
       else {
         const mode=input.mode||defaults.mode;
         if(mode==='audio'?!config.audioConfigured:!config.configured)throw new Error(mode==='audio'?'云端尚未配置音频直答模型密钥，请配置百炼模型后重试':'云端尚未配置语音识别密钥，请配置百炼服务后重试');
-        interview=(await this.api(owner,'/interviews',{method:'POST',body:{title:input.title||'面试记录',mode,provider:input.provider||defaults.provider,transcribe:mode==='transcript'?true:(input.transcribe??defaults.transcribe),audioModel:input.audioModel||defaults.audioModel,audioWindowSeconds:input.audioWindowSeconds??defaults.audioWindowSeconds,autoAnswer:mode==='transcript'&&input.autoAnswer===true,...(input.promptId?{promptId:input.promptId}:{})}})).interview;
+        interview=(await this.api(owner,'/interviews',{method:'POST',body:{title:input.title||'面试记录',mode,provider:input.provider||defaults.provider,textModels:input.textModels??defaults.textModels,asrModel:input.asrModel??defaults.asrModel,transcribe:mode==='transcript'?true:(input.transcribe??defaults.transcribe),audioModel:input.audioModel||defaults.audioModel,audioWindowSeconds:input.audioWindowSeconds??defaults.audioWindowSeconds,autoAnswer:mode==='transcript'&&input.autoAnswer===true,...(input.promptId?{promptId:input.promptId}:{})}})).interview;
       }
       this.check(owner,generation);validateSessionId(interview.id);this.state.interview=interview;startedId=interview.id;
       if(interview.mode==='audio'?!config.audioConfigured:!config.configured)throw new Error('云端尚未配置此模式的模型，请检查配置后重试');
@@ -246,7 +246,7 @@ class AudioController {
   }
   receive(event){
     if(event.type==='interview.answer'&&event.sessionId===this.state.interview?.id&&event.answer?.id){this.answerStates.set(event.answer.id,event.answer);if(this.answerStates.size>50)this.answerStates.delete(this.answerStates.keys().next().value);if(event.answer.id===this.state.triggerAnswerId){this.state.triggerStatus=event.answer.status;this.state.triggerError=event.answer.error||'';this.notify(true);}}
-    if(event.type==='interview.updated'&&event.interview?.id===this.state.interview?.id){if(['mode','provider','transcribe','audioModel','audioWindowSeconds','promptId','autoAnswer','status'].some(key=>this.state.interview[key]!==event.interview[key]))this.invalidateTrigger();this.state.interview=event.interview;if(['paused','ended'].includes(event.interview.status)&&['recording','ready','connecting'].includes(this.state.phase))void this.externalStop(event.interview.status).catch(error=>{if(this.valid()){this.state.error=error.message;this.notify(true);}});}
+    if(event.type==='interview.updated'&&event.interview?.id===this.state.interview?.id){if(['mode','provider','transcribe','audioModel','asrModel','audioWindowSeconds','promptId','autoAnswer','status'].some(key=>this.state.interview[key]!==event.interview[key])||JSON.stringify(this.state.interview.textModels)!==JSON.stringify(event.interview.textModels))this.invalidateTrigger();this.state.interview=event.interview;if(['paused','ended'].includes(event.interview.status)&&['recording','ready','connecting'].includes(this.state.phase))void this.externalStop(event.interview.status).catch(error=>{if(this.valid()){this.state.error=error.message;this.notify(true);}});}
     if(event.type==='interview.audio.status'&&event.sessionId===this.state.interview?.id&&(event.error||event.gap)){this.state.error=String(event.error||'音频中断，转写记录中已标记缺口');this.notify(true);}
   }
   async externalStop(status){

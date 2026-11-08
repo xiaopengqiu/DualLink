@@ -67,3 +67,12 @@ test('configured Qwen3.5 audio model omits the Qwen3.8-only channel fields',asyn
  const format=seen.events.find(e=>e.type==='session.update').session.audio.input.format;
  assert.deepEqual(format,{type:'pcm',sample_rate:16000});
 });
+
+test('custom audio model reaches upstream unless an explicit server allowlist forbids it',async t=>{
+ const {url,seen}=await upstream(t);const model='qwen3.5-omni-flash-realtime';
+ assert.equal(module.nativeAudioConfiguration({apiKey:'key',wsUrl:url}).customModelsAllowed,true);
+ await module.createNativeAudioRunner({apiKey:'key',wsUrl:url})({prompt:'测试',model,audioTurns:turns()});
+ assert.equal(new URL(seen.url,'http://localhost').searchParams.get('model'),model);
+ await assert.rejects(module.createNativeAudioRunner({apiKey:'key',wsUrl:url,models:['qwen3.8-omni-flash-realtime']})({prompt:'测试',model,audioTurns:turns()}),e=>e.code==='AI_NOT_CONFIGURED');
+ await assert.rejects(module.createNativeAudioRunner({apiKey:'key',wsUrl:url})({prompt:'测试',model:'x --key secret',audioTurns:turns()}),e=>e.code==='AI_NOT_CONFIGURED');
+});

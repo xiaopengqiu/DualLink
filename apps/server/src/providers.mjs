@@ -8,7 +8,12 @@ export class ProviderError extends Error {
   constructor(code, message) { super(message); this.name = 'ProviderError'; this.code = code; }
 }
 
-const allowedEnv = /^(PATH|Path|PATHEXT|SystemRoot|WINDIR|COMSPEC|HOME|USERPROFILE|TEMP|TMP|LANG|LC_ALL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|OPENAI_API_KEY|OPENAI_BASE_URL|CODEX_API_KEY|CODEX_HOME|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_HAIKU_MODEL|ANTHROPIC_DEFAULT_SONNET_MODEL|ANTHROPIC_DEFAULT_OPUS_MODEL|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|AWS_REGION|AWS_DEFAULT_REGION|AWS_PROFILE|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY)$/;
+const allowedEnv = /^(PATH|Path|PATHEXT|SystemRoot|WINDIR|COMSPEC|HOME|USERPROFILE|TEMP|TMP|LANG|LC_ALL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|OPENAI_API_KEY|OPENAI_BASE_URL|CODEX_API_KEY|CODEX_HOME|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|ANTHROPIC_MODEL|ANTHROPIC_DEFAULT_(HAIKU|SONNET|OPUS)_MODEL|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|AWS_REGION|AWS_DEFAULT_REGION|AWS_PROFILE|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY)$/;
+export function validateModel(value) {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/+\[\]-]{0,99}$/.test(value)) throw new ProviderError('INVALID_MODEL', '模型 ID 需为 1–100 个字母、数字或常用模型分隔符，不能包含空格或命令参数');
+  return value;
+}
 function environment(options) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => allowedEnv.test(key)));
   Object.assign(env, options.extraEnv || {});
@@ -45,6 +50,7 @@ export async function buildInvocation(options = {}, input) {
   const { job, image, bytes } = await validateInput(input);
   const docker = options.mode === 'docker';
   const provider = input.provider;
+  const model = validateModel(input.model || (provider === 'codex' ? options.codexModel : options.claudeModel));
   const imageArgument = image ? (docker ? `/job/${path.basename(image)}` : image) : null;
   let args;
   let stdin;
@@ -55,15 +61,15 @@ export async function buildInvocation(options = {}, input) {
     } else {
       args = ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '--json', '--cd', docker ? '/job' : job];
       if (!options.codexLoadUserConfig) args.push('--ignore-user-config', '--ignore-rules');
-      if (options.codexModel) args.push('--model', options.codexModel);
+      if (model) args.push('--model', model);
       if (image) args.push('--image', imageArgument);
       args.push('-'); stdin = input.prompt;
     }
   } else {
-    args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--no-session-persistence', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', ''];
+    args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--no-session-persistence', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', options.claudeLoadUserConfig ? 'user' : ''];
     if (options.claudeSafeMode !== false) args.push('--safe-mode');
     if (options.claudeBare) args.push('--bare');
-    if (options.claudeModel) args.push('--model', options.claudeModel);
+    if (model) args.push('--model', model);
     const lower = image?.toLowerCase() || '';
     const mediaType = lower.endsWith('.jpg') || lower.endsWith('.jpeg') ? 'image/jpeg' : lower.endsWith('.webp') ? 'image/webp' : 'image/png';
     const content = [{ type: 'text', text: input.prompt }];

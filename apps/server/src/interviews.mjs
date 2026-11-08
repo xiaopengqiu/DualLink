@@ -7,6 +7,7 @@ import { asrConfiguration, createDashScopeAsrFactory } from './asr.mjs';
 import { attachInterviewAudio, downloadInterviewAudio } from './audio.mjs';
 import { nativeAudioConfiguration } from './native-audio-providers.mjs';
 import { assembleInterviewContext, isQuestion } from './interview-context.mjs';
+import { modelId, modelMap, defaultTextModel } from './model-settings.mjs';
 
 const parse = (value, fallback = []) => { try { return JSON.parse(value); } catch { return fallback; } };
 const route = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
@@ -31,14 +32,18 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   }
   const omniConfig=nativeAudioConfiguration(omni),omniModel=omniConfig.model,audioModels=omniConfig.models;
   const audioConfigured=!!audioRunner||omniConfig.configured;
-  const serverDefaults={mode:process.env.INTERVIEW_DEFAULT_MODE||'transcript',provider:defaultProvider,transcribe:true,audioModel:omniModel,audioWindowSeconds:boundedNumber(process.env.INTERVIEW_AUDIO_WINDOW_SECONDS,120,15,180)};
+  const asrModels=[...new Set([asrConfig.model,...(process.env.ASR_MODELS||'').split(',').map(x=>x.trim()).filter(Boolean)])];
+  const customAsrModelsAllowed=!process.env.ASR_MODELS,customAudioModelsAllowed=omniConfig.customModelsAllowed;
+  const serverDefaults={mode:process.env.INTERVIEW_DEFAULT_MODE||'transcript',provider:defaultProvider,textModels:{codex:'',claude:'',bailian:''},asrModel:asrConfig.model,transcribe:true,audioModel:omniModel,audioWindowSeconds:boundedNumber(process.env.INTERVIEW_AUDIO_WINDOW_SECONDS,120,15,180)};
   const defaults=id=>({...serverDefaults,...parse(db.prepare('SELECT value FROM interview_preferences WHERE user_id=?').get(id)?.value,{})});
   const validateSettings=(body,current)=>{
     const result={...current};
     if(body.mode!==undefined){if(!['transcript','audio'].includes(body.mode))fail(400,'回答模式无效');result.mode=body.mode;}
     if(body.provider!==undefined){if(!validProviders.includes(body.provider))fail(400,'文字回答模型无效');result.provider=body.provider;}
     if(body.transcribe!==undefined){if(typeof body.transcribe!=='boolean')fail(400,'后台转写设置无效');result.transcribe=body.transcribe;}
-    if(body.audioModel!==undefined){if(!audioModels.includes(body.audioModel))fail(400,'音频模型未在服务端配置');result.audioModel=body.audioModel;}
+    if(body.audioModel!==undefined){modelId(body.audioModel);const selected=body.audioModel||omniModel;if(!customAudioModelsAllowed&&!audioModels.includes(selected))fail(400,'音频模型未在服务端配置');result.audioModel=selected;}
+    if(body.asrModel!==undefined){modelId(body.asrModel);const selected=body.asrModel||asrConfig.model;if(!customAsrModelsAllowed&&!asrModels.includes(selected))fail(400,'转写模型未在服务端配置');result.asrModel=selected;}
+    if(body.textModels!==undefined)result.textModels=modelMap(body.textModels,current.textModels);
     if(body.audioWindowSeconds!==undefined){if(!Number.isInteger(body.audioWindowSeconds)||body.audioWindowSeconds<15||body.audioWindowSeconds>180)fail(400,'音频窗口需为15至180秒');result.audioWindowSeconds=body.audioWindowSeconds;}
     return result;
   };
@@ -46,12 +51,12 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   let closed = false, pumping = false;
   const own = (id, userId) => { const row = db.prepare('SELECT * FROM interviews WHERE id=? AND user_id=?').get(id, userId); if (!row) fail(404, '面试会话不存在'); return row; };
   const user = id => db.prepare('SELECT * FROM users WHERE id=?').get(id);
-  const interviewView = row => ({ id: row.id, title: row.title, status: row.status, provider: row.provider, promptId: row.prompt_id, promptName: row.prompt_name, autoAnswer: !!row.auto_answer, mode:row.mode,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds,audioAvailable:!!db.prepare('SELECT seq FROM interview_audio_frames WHERE session_id=? AND byte_offset IS NOT NULL LIMIT 1').get(row.id), deviceId: row.device_id, recordingStatus: row.recording_status, error: row.error || null, createdAt: row.created_at, endedAt: row.ended_at, updatedAt: row.updated_at });
+  const interviewView = row => ({ id: row.id, title: row.title, status: row.status, provider: row.provider,textModels:modelMap(parse(row.text_models,{})),asrModel:row.asr_model||asrConfig.model, promptId: row.prompt_id, promptName: row.prompt_name, autoAnswer: !!row.auto_answer, mode:row.mode,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds,audioAvailable:!!db.prepare('SELECT seq FROM interview_audio_frames WHERE session_id=? AND byte_offset IS NOT NULL LIMIT 1').get(row.id), deviceId: row.device_id, recordingStatus: row.recording_status, error: row.error || null, createdAt: row.created_at, endedAt: row.ended_at, updatedAt: row.updated_at });
   const segmentView = row => ({ id: row.id, sessionId: row.session_id, track: row.track, segmentId: row.segment_key, text: row.text, startMs: row.start_ms, endMs: row.end_ms, final: !!row.final, revision: row.revision, replay: !!row.replay, createdAt: row.created_at, updatedAt: row.updated_at });
   const questionView = row => ({ id: row.id, sessionId: row.session_id, text: row.text, segmentIds: parse(row.segment_ids),audioRange:row.audio_start_ms===null?null:{startMs:row.audio_start_ms,endMs:row.audio_end_ms},audioTruncated:!!row.audio_truncated, revision: row.revision, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at });
   const answerView = row => {
     const context=row.context_snapshot_id?db.prepare('SELECT id,sources,summary,segment_ids,watermark FROM interview_contexts WHERE id=? AND session_id=?').get(row.context_snapshot_id,row.session_id):null;
-    return { id: row.id, sessionId: row.session_id, questionId: row.question_id, questionRevision: row.question_revision, provider: row.provider,mode:row.mode,audioModel:row.audio_model, status: row.status, text: row.text, error: row.error || null, contextSnapshotId: row.context_snapshot_id, usage: parse(row.usage, null), createdAt: row.created_at, updatedAt: row.updated_at,
+    return { id: row.id, sessionId: row.session_id, questionId: row.question_id, questionRevision: row.question_revision, provider: row.provider,model:row.model||null,mode:row.mode,audioModel:row.audio_model, status: row.status, text: row.text, error: row.error || null, contextSnapshotId: row.context_snapshot_id, usage: parse(row.usage, null), createdAt: row.created_at, updatedAt: row.updated_at,
       sources:context?parse(context.sources):[],contextSummary:context?{id:context.id,summary:context.summary,segmentIds:parse(context.segment_ids),watermark:context.watermark}:null };
   };
   const getSession = id => db.prepare('SELECT * FROM interviews WHERE id=?').get(id);
@@ -95,6 +100,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       for (const old of cancelled) {db.prepare("UPDATE interview_answers SET status='cancelled',updated_at=?,lease_until=NULL WHERE id=?").run(timestamp, old.id);db.prepare("UPDATE interview_questions SET status='cancelled',updated_at=? WHERE id=? AND revision=?").run(timestamp,old.question_id,old.question_revision);}
       db.prepare('INSERT INTO interview_answers(id,session_id,question_id,question_revision,provider,status,created_at,updated_at) VALUES(?,?,?,?,?,\'queued\',?,?)').run(id, interview.id, question.id, question.revision, interview.provider, timestamp, timestamp);
       db.prepare('UPDATE interview_answers SET mode=?,audio_model=?,provider=? WHERE id=?').run(mode,mode==='audio'?interview.audio_model:null,mode==='audio'?'omni':interview.provider,id);
+      db.prepare('UPDATE interview_answers SET model=? WHERE id=?').run(mode==='audio'?interview.audio_model:parse(interview.text_models,{})[interview.provider]||defaultTextModel(interview.provider,cli)||null,id);
       db.prepare("UPDATE interview_questions SET status='pending',updated_at=? WHERE id=?").run(timestamp, question.id);
       db.prepare('INSERT INTO quota_events(id,user_id,created_at) VALUES(?,?,?)').run(randomUUID(), owner.id, timestamp);
       return db.prepare('SELECT * FROM interview_answers WHERE id=?').get(id);
@@ -139,7 +145,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       db.prepare("UPDATE interview_questions SET status='answering',updated_at=? WHERE id=? AND revision=?").run(now(), question.id, question.revision); notifyQuestion(question.id); notifyAnswer(answer.id);
       let accumulated = '', lastSave = 0;
       let run=textRunner;if(answer.mode==='audio'){if(!audioRunner){const m=await import('./native-audio-providers.mjs');audioRunner=m.createNativeAudioRunner({...omni,timeoutMs});}run=audioRunner;}
-      const result = await run({audioTurns,model:answer.audio_model, provider: answer.provider, prompt: context.prompt, jobDir, sessionId: interview.id, userId: interview.user_id, signal: controller.signal, onDelta(delta) {
+      const result = await run({audioTurns,model:answer.model||answer.audio_model||undefined, provider: answer.provider, prompt: context.prompt, jobDir, sessionId: interview.id, userId: interview.user_id, signal: controller.signal, onDelta(delta) {
         if (controller.signal.aborted || typeof delta !== 'string') return;
         accumulated += delta;
         if (accumulated.length > 200000) { controller.abort(Object.assign(new Error('output limit'), { code: 'AI_OUTPUT_LIMIT' })); return; }
@@ -242,13 +248,14 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     }
   }
   const maxDailyMinutes=boundedNumber(options.maxDailyMinutes??process.env.ASR_DAILY_MINUTES,480,1,2880);
-  const audio = attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory: asrFactory || createDashScopeAsrFactory(asr), recordSegment,onStored:notifyInterview,asrRequested:id=>!!getSession(id)?.transcribe,asrEnabled:id=>{const i=getSession(id);return i&&(i.mode==='transcript'||(i.transcribe&&configured));},asrRequired:id=>getSession(id)?.mode==='transcript', status: audioStatus, gap, maxSessionMinutes, retentionDays, maxDailyMinutes, maxUserBytes: boundedNumber(options.maxUserAudioBytes ?? process.env.AUDIO_MAX_USER_BYTES, 512*1024*1024, 1024*1024, 2*1024*1024*1024) });
+  const startAsr=asrFactory||createDashScopeAsrFactory(asr);
+  const audio = attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory:input=>startAsr({...input,model:getSession(input.sessionId)?.asr_model||asrConfig.model}), recordSegment,onStored:notifyInterview,asrRequested:id=>!!getSession(id)?.transcribe,asrEnabled:id=>{const i=getSession(id);return i&&(i.mode==='transcript'||(i.transcribe&&configured));},asrRequired:id=>getSession(id)?.mode==='transcript', status: audioStatus, gap, maxSessionMinutes, retentionDays, maxDailyMinutes, maxUserBytes: boundedNumber(options.maxUserAudioBytes ?? process.env.AUDIO_MAX_USER_BYTES, 512*1024*1024, 1024*1024, 2*1024*1024*1024) });
   db.prepare("UPDATE interview_answers SET status=CASE WHEN attempts<3 THEN 'queued' ELSE 'failed' END,lease_until=NULL,updated_at=? WHERE status='running'").run(now());
 
   // Surviving recordings cannot truthfully remain "recording" after a restart.
   for (const old of db.prepare("SELECT * FROM interviews WHERE status='recording'").all()) { db.prepare("UPDATE interviews SET status='paused',recording_status='interrupted',error='服务器已重启，请恢复录音并补传本地缓存',updated_at=? WHERE id=?").run(now(), old.id); gap(old.id, null, null, null, '服务器重启造成录音中断'); }
-  const prepare = interview => { if (interview.mode==='transcript' && textRunner.prepareSession && interview.status === 'recording') void Promise.resolve(textRunner.prepareSession({ userId: interview.user_id, sessionId: interview.id,provider:interview.provider })).catch(() => { /* A model failure never masquerades as an ASR recording failure. */ }); };
-  router.get('/config', (req, res) => res.json({ configured, model: asrConfig.model, region: asrConfig.region, sampleRate: 16000, maxSessionMinutes,maxDailyMinutes, rawAudioRetentionDays: retentionDays,audioConfigured,audioModels,defaults:defaults(req.identity.userId), autoAnswerAvailable: true, providers: ['codex','claude', ...(process.env.INTERVIEW_TEXT_API_KEY || process.env.DASHSCOPE_API_KEY || asrConfig.apiKey || !lazyRunner ? ['bailian'] : [])], defaultProvider }));
+  const prepare = interview => { if (interview.mode==='transcript' && textRunner.prepareSession && interview.status === 'recording') void Promise.resolve(textRunner.prepareSession({ userId: interview.user_id, sessionId: interview.id,provider:interview.provider,model:parse(interview.text_models,{})[interview.provider]||defaultTextModel(interview.provider,cli)||undefined })).catch(() => { /* A model failure never masquerades as an ASR recording failure. */ }); };
+  router.get('/config', (req, res) => res.json({ configured, model: asrConfig.model,asrModel:asrConfig.model,asrModels,customAsrModelsAllowed,customAudioModelsAllowed, region: asrConfig.region, sampleRate: 16000, maxSessionMinutes,maxDailyMinutes, rawAudioRetentionDays: retentionDays,audioConfigured,audioModels,defaults:defaults(req.identity.userId), autoAnswerAvailable: true, providers: ['codex','claude', ...(process.env.INTERVIEW_TEXT_API_KEY || process.env.DASHSCOPE_API_KEY || asrConfig.apiKey || !lazyRunner ? ['bailian'] : [])], defaultProvider }));
   router.get('/preferences',(req,res)=>res.json({preferences:defaults(req.identity.userId)}));
   router.patch('/preferences',(req,res)=>{if(req.identity.kind!=='web')fail(403,'请在网站配置账号默认设置');const value=validateSettings(req.body,defaults(req.identity.userId));db.prepare('INSERT INTO interview_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(req.identity.userId,JSON.stringify(value));res.json({preferences:value});});
   router.get('/', (req, res) => { const limit = Math.max(1,Math.min(200,parseInt(req.query.limit,10)||50)); res.json({ interviews: db.prepare('SELECT * FROM interviews WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit).map(interviewView) }); });
@@ -267,6 +274,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       const files = db.prepare("SELECT id FROM knowledge WHERE user_id=? AND status='ready'").all(owner).map(file => file.id);
       db.prepare('INSERT INTO interviews(id,user_id,device_id,title,status,provider,prompt_id,prompt_name,style_snapshot,knowledge_ids,hotwords,auto_answer,created_at,updated_at) VALUES(?,?,?,?,\'recording\',?,?,?,?,?,?,?,?,?)').run(id, owner, req.identity.deviceId || null, body.title ? text(body.title,'面试名称',120) : '面试 '+timestamp.slice(0,16).replace('T',' '), provider, prompt?.id || null, prompt?.name || '默认回答风格', prompt?.content || '中文，先给结论再给关键依据，不编造个人经历。', JSON.stringify(files), JSON.stringify(hotwords.map(word => word.trim())), settings.mode==='audio'||body.autoAnswer!==true ? 0 : 1, timestamp, timestamp);
       db.prepare('UPDATE interviews SET mode=?,transcribe=?,audio_model=?,audio_window_seconds=? WHERE id=?').run(settings.mode,settings.mode==='transcript'?1:settings.transcribe?1:0,settings.audioModel,settings.audioWindowSeconds,id);
+      db.prepare('UPDATE interviews SET text_models=?,asr_model=? WHERE id=?').run(JSON.stringify(settings.textModels),settings.asrModel,id);
       row = getSession(id);
     })();
     prepare(row); notifyInterview(row.id); res.status(201).json({ interview: interviewView(row) });
@@ -289,14 +297,16 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     const row = own(req.params.id,req.identity.userId), body = req.body;
     if (body.autoAnswer !== undefined && typeof body.autoAnswer !== 'boolean') fail(400, '自动回答设置无效');
     if (body.provider !== undefined && !validProviders.includes(body.provider)) fail(400, '不支持的面试回答模型');
-    const settings=validateSettings(body,{mode:row.mode,provider:row.provider,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds});
-    const changes=['mode','transcribe','audioModel','audioWindowSeconds'].some(key=>body[key]!==undefined&&settings[key]!==({mode:row.mode,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds})[key]);
+    const previous={mode:row.mode,provider:row.provider,textModels:modelMap(parse(row.text_models,{})),asrModel:row.asr_model||asrConfig.model,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds};
+    const settings=validateSettings(body,previous);
+    const changes=['mode','provider','transcribe','audioModel','audioWindowSeconds','textModels','asrModel'].some(key=>body[key]!==undefined&&JSON.stringify(settings[key])!==JSON.stringify(previous[key]));
     if(changes&&row.status==='recording')fail(409,'请先暂停录音再切换回答模式或音频配置');
     if(changes||body.provider!==undefined)db.prepare('UPDATE interviews SET config_version=config_version+1 WHERE id=?').run(row.id);
     if(changes){for(const a of db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").all(row.id))cancelAnswer(a.id);stopAuto(row.id);}
     if (body.provider && body.provider !== row.provider) { for (const answer of db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").all(row.id)) cancelAnswer(answer.id); void textRunner.closeSession?.(row.id); }
     db.prepare('UPDATE interviews SET title=?,auto_answer=?,provider=?,updated_at=? WHERE id=?').run(body.title === undefined ? row.title : text(body.title,'面试名称',120), body.autoAnswer === undefined ? row.auto_answer : body.autoAnswer ? 1 : 0, body.provider || row.provider, now(), row.id);
     db.prepare('UPDATE interviews SET mode=?,transcribe=?,audio_model=?,audio_window_seconds=?,auto_answer=? WHERE id=?').run(settings.mode,settings.mode==='transcript'?1:settings.transcribe?1:0,settings.audioModel,settings.audioWindowSeconds,settings.mode==='audio'?0:body.autoAnswer===undefined?row.auto_answer:body.autoAnswer?1:0,row.id);
+    db.prepare('UPDATE interviews SET text_models=?,asr_model=? WHERE id=?').run(JSON.stringify(settings.textModels),settings.asrModel,row.id);
     if (body.autoAnswer === false) stopAuto(row.id); notifyInterview(row.id); res.json({ interview: interviewView(getSession(row.id)) });
   });
   async function transition(row, action) {
@@ -412,7 +422,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     if(format==='json')return res.json(data); if(format!=='md')fail(400,'导出格式只支持 JSON 或 Markdown');
     const lines=[`# ${row.title}`,`回答模式：${row.mode==='audio'?'音频直答':'转写后回答'}`,`后台转写：${row.transcribe?'开启':'关闭；原始音频按保留策略保存，没有逐字记录'}`,`开始：${row.created_at}`,`结束：${row.ended_at||'未结束'}`,'','## 实际对话（远端 / 本人）',''];
     for(const s of data.segments)lines.push(`**${(s.startMs/1000).toFixed(1)}s ${s.track==='self'?'本人':'远端'}${s.final?'':'（临时识别）'}**`,s.text,'');
-    lines.push('## AI 建议（不代表本人实际说过）','');for(const answer of data.answers){const q=data.questions.find(x=>x.id===answer.questionId);lines.push(`### ${q?.text||'问题'}（问题版本 ${answer.questionRevision}）`,`状态：${answer.status}；模式：${answer.mode}；模型：${answer.audioModel||answer.provider}`,q?.audioRange?`音频范围：${q.audioRange.startMs}–${q.audioRange.endMs}ms${q.audioTruncated?'（已按窗口截断）':''}`:'',answer.text||answer.error||'尚无回答','');}
+    lines.push('## AI 建议（不代表本人实际说过）','');for(const answer of data.answers){const q=data.questions.find(x=>x.id===answer.questionId);lines.push(`### ${q?.text||'问题'}（问题版本 ${answer.questionRevision}）`,`状态：${answer.status}；模式：${answer.mode}；执行方式：${answer.provider}；模型：${answer.model||answer.audioModel||'CLI默认模型'}`,q?.audioRange?`音频范围：${q.audioRange.startMs}–${q.audioRange.endMs}ms${q.audioTruncated?'（已按窗口截断）':''}`:'',answer.text||answer.error||'尚无回答','');}
     if(data.gaps.length){lines.push('## 录音缺口与恢复记录','');for(const g of data.gaps)lines.push(`- ${g.reason}${g.startMs!==null?'，位置 '+(g.startMs/1000).toFixed(1)+'s':''}`);}
     res.type('text/markdown; charset=utf-8').send(lines.join('\n'));
   });
