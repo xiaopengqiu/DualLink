@@ -6,6 +6,8 @@ function error(error){localError=String(error?.message||error).replace(/^Error i
 async function action(button,fn){localError='';button.disabled=true;try{return await fn();}catch(e){error(e);}finally{button.disabled=false;if(current)render(current);}}
 function render(state){
   current=state;
+  window.DualUpdaterUI?.render(state.update);
+  if(state.update?.currentVersion)document.querySelector('.version').textContent='WINDOWS CLIENT · V'+state.update.currentVersion;
   const status=state.connected?'云端已连接':state.connecting?'正在连接…':state.paired?'等待重连':'尚未配对';
   text('side-status',status);text('side-user',state.user?.name||state.settings.deviceName);text('connection-badge',state.connected?'● 已连接':state.paired?'连接中':'未配对');
   $('connection-badge').className='badge '+(state.connected?'online':state.paired?'waiting':'muted');$('side-dot').className='dot '+(state.connected?'online':'');
@@ -24,7 +26,7 @@ function render(state){
   if(!state.lastCapture){if($('preview-dialog').open)$('preview-dialog').close();$('preview-image').removeAttribute('src');}
   if(!settingsDirty){
     $('answer-shortcut').value=state.settings.answerShortcut||'Ctrl+Alt+Enter';$('full-shortcut').value=state.settings.fullShortcut;$('region-shortcut').value=state.settings.regionShortcut;$('provider').value=state.settings.provider;
-    $('use-account-models').checked=state.settings.useAccountModels!==false;$('codex-model').value=state.settings.models?.codex||'';$('claude-model').value=state.settings.models?.claude||'';$('analyze').checked=state.settings.analyze;$('lan-first').checked=state.settings.lanFirst;$('auto-start').checked=state.settings.autoStart;
+    $('use-account-models').checked=state.settings.useAccountModels!==false;$('codex-model').value=state.settings.models?.codex||'';$('claude-model').value=state.settings.models?.claude||'';$('analyze').checked=state.settings.analyze;$('lan-first').checked=state.settings.lanFirst;$('auto-start').checked=state.settings.autoStart;$('auto-check-updates').checked=state.settings.autoCheckUpdates!==false;
     const selector=$('display');selector.replaceChildren();const defaultOption=document.createElement('option');defaultOption.value='';defaultOption.textContent='跟随鼠标所在显示器';selector.append(defaultOption);
     for(const display of state.displays){const option=document.createElement('option');option.value=display.id;option.textContent=`${display.name} · ${display.width} × ${display.height}`;selector.append(option);}selector.value=state.settings.displayId;
   }
@@ -45,7 +47,7 @@ $('retry').addEventListener('click',()=>action($('retry'),()=>api.retryUploads()
 $('preview-last').addEventListener('click',async()=>{const image=await api.lastImage();if(image){$('preview-image').src=image;$('preview-dialog').showModal();}});
 $('close-preview').addEventListener('click',()=>$('preview-dialog').close());
 $('settings-form').addEventListener('input',()=>{settingsDirty=true;for(const id of ['provider','codex-model','claude-model'])$(id).disabled=$('use-account-models').checked;text('save-feedback','有未保存的修改');});
-$('settings-form').addEventListener('submit',event=>{event.preventDefault();const button=event.submitter;action(button,async()=>{const state=await api.saveSettings({displayId:$('display').value,fullShortcut:$('full-shortcut').value,regionShortcut:$('region-shortcut').value,answerShortcut:$('answer-shortcut').value,provider:$('provider').value,useAccountModels:$('use-account-models').checked,models:{codex:$('codex-model').value.trim(),claude:$('claude-model').value.trim()},analyze:$('analyze').checked,lanFirst:$('lan-first').checked,autoStart:$('auto-start').checked});settingsDirty=false;render(state);text('save-feedback','✓ 设置已保存');});});
+$('settings-form').addEventListener('submit',event=>{event.preventDefault();const button=event.submitter;action(button,async()=>{const state=await api.saveSettings({displayId:$('display').value,fullShortcut:$('full-shortcut').value,regionShortcut:$('region-shortcut').value,answerShortcut:$('answer-shortcut').value,provider:$('provider').value,useAccountModels:$('use-account-models').checked,models:{codex:$('codex-model').value.trim(),claude:$('claude-model').value.trim()},analyze:$('analyze').checked,lanFirst:$('lan-first').checked,autoStart:$('auto-start').checked,autoCheckUpdates:$('auto-check-updates').checked});settingsDirty=false;render(state);text('save-feedback','✓ 设置已保存');});});
 for(const nav of document.querySelectorAll('[data-tab]'))nav.addEventListener('click',()=>{const tab=nav.dataset.tab;for(const section of ['workspace','preferences','voice'])$(section+'-tab').hidden=section!==tab;document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button===nav));window.scrollTo(0,0);text('breadcrumb-page',tab==='voice'?'面试录音':tab==='preferences'?'偏好设置':'连接与截图');text('page-title',tab==='voice'?'让对话，成为连续的思路':tab==='preferences'?'让每一次截图更顺手':'连接你的下一块屏幕');text('page-description',tab==='voice'?'记录面试双方原话，结合前文与知识生成建议。':tab==='preferences'?'配置捕获方式、传输策略和默认模型。':'从电脑捕获内容，在 iPad 上接续思考。');});
 
 function updatePeerCount(){api.peerCount([...peers.values()].filter(p=>p.channel?.readyState==='open').length);}

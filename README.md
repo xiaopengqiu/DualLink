@@ -1,8 +1,10 @@
 # 双端互联 · Dual Link
 
-下载客户端、完整源码包与编译后的网页：[v1.3.1 发布页面](https://github.com/xiaopengqiu/DualLink/releases/tag/v1.3.1)。编译产物通过 GitHub Releases 分发；Git 仓库保存源码，依赖通过 `npm ci` 安装。
+下载客户端、完整源码包与编译后的网页：[v1.4.1 发布页面](https://github.com/xiaopengqiu/DualLink/releases/tag/v1.4.1)。编译产物通过 GitHub Releases 分发；Git 仓库保存源码，依赖通过 `npm ci` 安装。
 
-自托管的 Windows → iPad 截图与实时语音问答工具。PC 快捷键截图或采集会议/麦克风声音，Linux 服务结合当前账号的 Prompt、知识库和会话历史生成回答，iPad 网页显示并保存结果。当前版本 **1.3.1**。
+自托管的 Windows → iPad 截图与实时语音问答工具。PC 快捷键截图或采集会议/麦克风声音，Linux 服务结合当前账号的 Prompt、知识库和会话历史生成回答，iPad 网页显示并保存结果。当前版本 **1.4.1**。
+
+1.4 新增[客户端一键升级](docs/CLIENT_UPDATES.md)：安装版和便携版均可检查、下载并校验新版本，空闲时安装并重启。1.3及更早版本须手动安装1.4一次，之后可在客户端升级。
 
 管理员可在网页「账号设置 → 模型与接口配置」为截图、转写问答、语音识别及音频直答分别配置模型、接口和 API Key；普通账号与设备直接继承，无权修改。
 

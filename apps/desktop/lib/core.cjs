@@ -1,5 +1,5 @@
 'use strict';
-const DEFAULT_SETTINGS=Object.freeze({cloudUrl:'',deviceName:'我的电脑',displayId:'',fullShortcut:'Ctrl+Alt+S',regionShortcut:'Ctrl+Alt+R',answerShortcut:'Ctrl+Alt+Enter',provider:'codex',useAccountModels:true,models:{codex:'',claude:''},analyze:true,lanFirst:false,autoStart:false});
+const DEFAULT_SETTINGS=Object.freeze({cloudUrl:'',deviceName:'我的电脑',displayId:'',fullShortcut:'Ctrl+Alt+S',regionShortcut:'Ctrl+Alt+R',answerShortcut:'Ctrl+Alt+Enter',provider:'codex',useAccountModels:true,models:{codex:'',claude:''},analyze:true,lanFirst:false,autoStart:false,autoCheckUpdates:true});
 function normalizeCloudUrl(value){
   if(typeof value!=='string'||value.length>2048)throw new Error('请输入有效的云服务地址');
   let url;try{url=new URL(value.trim());}catch{throw new Error('请输入完整地址，例如 https://assist.example.com');}
@@ -20,7 +20,7 @@ function validateSettings(value){
   }
   const normalized=['fullShortcut','regionShortcut','answerShortcut'].map(key=>settings[key].toLowerCase().replace(/commandorcontrol|control/g,'ctrl').replace(/\s+/g,'').split('+').sort().join('+'));
   if(new Set(normalized).size!==3)throw new Error('截图与回答快捷键不能相同');
-  for(const key of ['analyze','lanFirst','autoStart','useAccountModels'])if(typeof settings[key]!=='boolean')throw new Error('设置值无效');
+  for(const key of ['analyze','lanFirst','autoStart','useAccountModels','autoCheckUpdates'])if(typeof settings[key]!=='boolean')throw new Error('设置值无效');
   settings.displayId=String(settings.displayId||'');
   return settings;
 }
