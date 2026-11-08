@@ -428,3 +428,13 @@ test('microphone ordinary self descriptions stay context while explicit requests
   s.interviews.recordSegment(session.id,'self','request',{text:'我想知道 Redis 的持久化机制',startMs:700,endMs:1100,final:true},false);
   const result=await s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId:randomUUID()});assert.equal(result.status,201);assert.match((await result.json()).question.text,/Redis/);
 });
+
+test('blank session model inherits updated administrator defaults while explicit session choices stay fixed',async t=>{
+  const calls=[],s=await setup(t,{cli:{codexModel:'gpt-5.6-sol'},textRunner:async input=>{calls.push(input);return {answer:'model verified'};}}),a=await s.login(),session=await s.create(a,{autoAnswer:false});
+  await s.api(`/interviews/${session.id}/pause`,a,'POST',{});
+  const saved=await s.api('/account/ai',a,'PUT',{profiles:{'transcript.codex':{model:'gpt-6.1-sol'}}});assert.equal(saved.status,200);
+  const r=await s.api(`/interviews/${session.id}/questions`,a,'POST',{text:'解释模型继承'});assert.equal(r.status,201);const body=await r.json();assert.equal(body.answer.model,'gpt-6.1-sol');await waitFor(()=>calls.length===1);assert.equal(calls[0].model,'gpt-6.1-sol');
+  await s.api(`/interviews/${session.id}`,a,'PATCH',{textModels:{codex:'explicit-model'}});
+  const second=await s.api(`/interviews/${session.id}/questions`,a,'POST',{text:'解释显式设置'});assert.equal(second.status,201);assert.equal((await second.json()).answer.model,'explicit-model');
+  assert.equal(s.db.prepare('SELECT model FROM interview_answers WHERE id=?').get(body.answer.id).model,'gpt-6.1-sol');
+});
