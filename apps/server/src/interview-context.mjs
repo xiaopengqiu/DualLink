@@ -41,5 +41,5 @@ export function assembleInterviewContext({ style = '', question = '', segments =
 }
 
 export function isQuestion(text) {
-  return /[?？]|怎么|如何|为什么|什么|是否|能否|区别|介绍|解释|说说|谈谈|讲讲|请.{0,30}(?:说|讲|写|介绍|描述|分析|实现|给出)|\b(?:what|why|how|describe|explain|tell me|can you|could you|implement)\b/i.test(text || '');
+  return /我想知道|(?:帮我|希望你|想请你).{0,30}(?:回答|解答|解释|分析)|[?？]|怎么|如何|为什么|什么|是否|能否|区别|介绍|解释|说说|谈谈|讲讲|请.{0,30}(?:说|讲|写|介绍|描述|分析|实现|给出|回答|解答|解释)|\b(?:what|why|how|describe|explain|tell me|can you|could you|implement)\b/i.test(text || '');
 }

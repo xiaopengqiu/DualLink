@@ -410,3 +410,21 @@ test('one rejected HTTP audio chunk marks its track gap while both recording tra
   const result=await s.api(`/interviews/${session.id}/trigger`,device,'POST',{requestId:randomUUID()});assert.equal(result.status,201);assert.match((await result.json()).question.text,/缓存/);
   const gap=s.db.prepare('SELECT track,reason FROM interview_gaps WHERE session_id=?').get(session.id);assert.equal(gap.track,'self');assert.match(gap.reason,/后续录音继续/);await s.api(`/interviews/${session.id}/pause`,a,'POST',{});
 });
+
+test('clear microphone questions can be answered from paused history despite old ASR failure',async t=>{
+  const calls=[],s=await setup(t,{textRunner:async input=>{calls.push(input);return {answer:'缓存的作用是减少重复查询。'};}}),a=await s.login(),b=await s.login('b@example.com'),session=await s.create(a,{autoAnswer:false});
+  s.interviews.recordSegment(session.id,'self','question',{text:'请帮我回答一下，缓存为什么能提升性能？',startMs:100,endMs:500,final:true},false);
+  await s.api(`/interviews/${session.id}/pause`,a,'POST',{});s.db.prepare('UPDATE interviews SET error=? WHERE id=?').run('语音识别尾句等待失败，记录可能存在缺口',session.id);
+  const requestId=randomUUID(),result=await s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId});assert.equal(result.status,201);const answer=await result.json();assert.match(answer.question.text,/本人麦克风/);assert.match(answer.question.text,/缓存为什么/);
+  await waitFor(()=>calls.length);await waitFor(()=>s.db.prepare('SELECT status FROM interview_answers WHERE id=?').get(answer.answer.id).status==='completed');assert.match(calls[0].prompt,/本人实际发言/);
+  const repeated=await(await s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId})).json();assert.equal(repeated.answer.id,answer.answer.id);
+  assert.equal((await s.api(`/interviews/${session.id}/trigger`,b,'POST',{requestId:randomUUID()})).status,404);
+});
+
+test('microphone ordinary self descriptions stay context while explicit requests route to answering',async t=>{
+  const s=await setup(t),a=await s.login(),session=await s.create(a,{autoAnswer:false});
+  s.interviews.recordSegment(session.id,'self','statement',{text:'我做过三个后端项目。',startMs:100,endMs:500,final:true},false);
+  const rejected=await s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId:randomUUID()});assert.equal(rejected.status,409);assert.equal(s.db.prepare('SELECT count(*) AS n FROM interview_answers').get().n,0);
+  s.interviews.recordSegment(session.id,'self','request',{text:'我想知道 Redis 的持久化机制',startMs:700,endMs:1100,final:true},false);
+  const result=await s.api(`/interviews/${session.id}/trigger`,a,'POST',{requestId:randomUUID()});assert.equal(result.status,201);assert.match((await result.json()).question.text,/Redis/);
+});

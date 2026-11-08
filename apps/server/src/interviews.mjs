@@ -373,11 +373,14 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     const same=db.prepare('SELECT * FROM interview_triggers WHERE session_id=? AND request_id=?').get(sessionId,requestId);
     const resultFor=t=>({question:questionView(db.prepare('SELECT * FROM interview_questions WHERE id=?').get(t.question_id)),answer:answerView(db.prepare('SELECT * FROM interview_answers WHERE id=?').get(t.answer_id))});
     if(same)return resultFor(same);
-    if(!['recording','paused'].includes(interview.status))fail(409,'本场面试已经结束，请选择已有问题重新生成');
     const recent=db.prepare('SELECT * FROM interview_triggers WHERE session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1').get(sessionId);
     if(recent&&recent.config_version===interview.config_version&&Date.now()-Date.parse(recent.created_at)<600)return resultFor(recent);
-    const tracks=db.prepare('SELECT track FROM interview_audio_frames WHERE session_id=? AND replay=0 AND active=1 GROUP BY track').all(sessionId).map(row=>row.track);
-    if(!tracks.includes('remote')&&tracks.includes('self'))fail(409,'未检测到远端/系统声音，目前只录到了本人麦克风。回答快捷键读取远端提问，请检查电脑的系统声音采集或播放对方音频后再试');
+    if(req.body.historyTrack!==undefined&&!['remote','self'].includes(req.body.historyTrack))fail(400,'历史提问来源无效');
+    if(req.body.historyTrack)return historyAnswer(req.body.historyTrack);
+    if(interview.mode==='transcript'&&interview.status!=='recording'){
+      const selected=historySource();if(selected)return historyAnswer(selected);
+    }
+    if(!['recording','paused'].includes(interview.status))fail(409,'本场会话没有可回答的历史转写，请选择已有问题或手动输入问题');
     let last=db.prepare("SELECT * FROM interview_questions WHERE session_id=? AND origin=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(sessionId,'trigger_'+interview.mode);
     let rangeStart,rangeEnd,captureEndMs,selectedSegments=[],truncated=false,questionText;
     if(interview.mode==='audio'){
@@ -390,13 +393,17 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       const time=value=>`${Math.floor(value/60000).toString().padStart(2,'0')}:${Math.floor(value/1000%60).toString().padStart(2,'0')}`;
       questionText=`音频提问 ${time(rangeStart)}–${time(rangeEnd)}`;
     }else{
-      if(effectiveAsr().transport==='http') {
+      if(interview.status==='recording'&&effectiveAsr().transport==='http') {
         let timer;
         try { await Promise.race([audio.flushSession(sessionId),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Object.assign(new Error('分段语音仍在识别，请稍后再次触发回答'),{status:409})),12000);})]); }
+        catch(error){const selected=historySource();if(selected)return historyAnswer(selected);throw error;}
         finally {clearTimeout(timer);}
         const current=getSession(sessionId);revalidateTriggerIdentity(req,current);
         if(!current||current.config_version!==configVersion)fail(409,'回答模式或配置已变化，请重新触发');
       }
+      if(historySource()==='self')return historyAnswer('self');
+      const tracks=db.prepare('SELECT track FROM interview_audio_frames WHERE session_id=? AND replay=0 AND active=1 GROUP BY track').all(sessionId).map(row=>row.track);
+      if(!tracks.includes('remote')&&tracks.includes('self'))fail(409,'目前只录到了本人麦克风，尚未发现明确提问。请说出希望 AI 回答的问题，或手动输入问题');
       const deadline=Date.now()+boundedNumber(options.triggerTranscriptWaitMs,1200,20,2000);
       const latestVoice=db.prepare("SELECT max(start_ms+sample_count/16) AS end FROM interview_audio_frames WHERE session_id=? AND track='remote' AND replay=0 AND active=1").get(sessionId).end;
       const waitingForAudio=latestVoice!==null&&latestVoice>(last?.capture_end_ms??last?.audio_end_ms??-1);
@@ -424,6 +431,31 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     db.prepare('UPDATE interview_questions SET capture_end_ms=?,segment_ids=?,audio_start_ms=?,audio_end_ms=?,audio_truncated=?,trigger_watermark=? WHERE id=?').run(captureEndMs,JSON.stringify(selectedSegments),rangeStart,rangeEnd,truncated?1:0,interview.mode==='transcript'?Math.max(...db.prepare("SELECT start_ms FROM interview_segments WHERE session_id=? AND track='remote' AND replay=0 AND start_ms<=?").all(sessionId,rangeEnd).map(s=>s.start_ms)):rangeEnd,created.question.id);
     notifyQuestion(created.question.id);
     return remember(db.prepare('SELECT * FROM interview_questions WHERE id=?').get(created.question.id),created.answer);
+    function historySource(){
+      const remote=db.prepare("SELECT start_ms FROM interview_segments WHERE session_id=? AND track='remote' AND final=1 ORDER BY start_ms DESC LIMIT 1").get(sessionId);
+      const self=db.prepare("SELECT text,start_ms FROM interview_segments WHERE session_id=? AND track='self' AND final=1 ORDER BY start_ms DESC LIMIT 50").all(sessionId);
+      const question=self.find(row=>isQuestion(row.text));
+      if(question&&(!remote||question.start_ms>remote.start_ms))return 'self';
+      return remote?'remote':null;
+    }
+    function historyAnswer(track){
+      let rows=db.prepare('SELECT * FROM interview_segments WHERE session_id=? AND track=? AND final=1 ORDER BY start_ms DESC,rowid DESC LIMIT 50').all(sessionId,track).reverse();
+      if(!rows.length)fail(409,'该音轨尚无已保存的转写，请先录音或手动输入问题');
+      const latest=rows.at(-1).end_ms??rows.at(-1).start_ms;
+      rows=rows.filter(row=>(row.end_ms??row.start_ms)>=latest-120000);
+      if(track==='self'&&req.body.historyTrack!=='self'){
+        const index=rows.findLastIndex(row=>isQuestion(row.text));
+        if(index<0)fail(409,'本人历史转写中尚未发现明确提问，请手动输入希望 AI 回答的问题');
+        rows=rows.slice(index);
+      }
+      const label=track==='self'?'本人麦克风中的明确提问（用户主动触发回答）':'远端历史提问';
+      const questionText=`【${label}】\n`+rows.map(row=>row.text).join('\n').slice(-7800);
+      const created=createQuestion(interview,{text:questionText},'history_'+track);
+      db.prepare('UPDATE interview_questions SET segment_ids=?,audio_start_ms=?,audio_end_ms=? WHERE id=?').run(JSON.stringify(rows.map(row=>row.id)),rows[0].start_ms,latest,created.question.id);
+      for(const row of rows)db.prepare('INSERT OR IGNORE INTO interview_question_segments(question_id,segment_id) VALUES(?,?)').run(created.question.id,row.id);
+      notifyQuestion(created.question.id);
+      return remember(db.prepare('SELECT * FROM interview_questions WHERE id=?').get(created.question.id),created.answer);
+    }
     function remember(question,answer){db.prepare('INSERT INTO interview_triggers(session_id,request_id,question_id,answer_id,created_at,config_version) VALUES(?,?,?,?,?,?)').run(sessionId,requestId,question.id,answer.id,now(),interview.config_version);return {question:questionView(question),answer:answerView(answer)};}
   }
   router.post('/:id/trigger',route(async(req,res)=>{
