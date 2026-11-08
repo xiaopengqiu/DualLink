@@ -455,3 +455,11 @@ test('web administrator changes replace inherited nonempty snapshots for existin
   await s.api(`/interviews/${session.id}`,a,'PATCH',{textModels:{claude:''}});
   assert.equal((await(await s.api(`/interviews/${session.id}`,a)).json()).interview.textModels.claude,'model-C');
 });
+
+test('editing one session model cannot accidentally pin unchanged inherited models sent by the web form',async t=>{
+  const s=await setup(t,{cli:{codexModel:'server-default'}}),a=await s.login(),session=await s.create(a);await s.api(`/interviews/${session.id}/pause`,a,'POST',{});
+  const form=(await(await s.api(`/interviews/${session.id}`,a)).json()).interview.textModels;
+  const patch=await s.api(`/interviews/${session.id}`,a,'PATCH',{textModels:{...form,claude:'session-claude'}});assert.equal(patch.status,200);
+  await s.api('/account/ai',a,'PUT',{profiles:{'transcript.codex':{model:'new-admin-model'}}});
+  const current=(await(await s.api(`/interviews/${session.id}`,a)).json()).interview;assert.equal(current.textModels.codex,'new-admin-model');assert.equal(current.textModels.claude,'session-claude');assert.equal(current.textModelSources.codex,'管理员网页配置');
+});

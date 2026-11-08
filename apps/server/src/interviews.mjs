@@ -55,10 +55,10 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     for(const provider of validProviders)models[provider]=models[provider]||defaultTextModel(provider,cli);
     return {...row,provider:overrides.provider||inherited.provider,text_models:JSON.stringify(models),asr_model:overrides.asrModel||inherited.asrModel,audio_model:overrides.audioModel||inherited.audioModel};
   };
-  const overridePatch=(current,body,uid)=>{
+  const overridePatch=(current,body,uid,previousModels=null)=>{
     const result={...current,textModels:{...current.textModels}},inherited=defaults(uid);
     for(const key of ['provider','asrModel','audioModel'])if(body[key]!==undefined){if(!body[key]||body[key]===inherited[key])delete result[key];else result[key]=body[key];}
-    if(body.textModels)for(const [provider,model] of Object.entries(body.textModels)){if(!model||model===inherited.textModels?.[provider])delete result.textModels[provider];else result.textModels[provider]=model;}
+    if(body.textModels)for(const [provider,model] of Object.entries(body.textModels)){if(model&&previousModels&&model===previousModels[provider])continue;if(!model||model===inherited.textModels?.[provider])delete result.textModels[provider];else result.textModels[provider]=model;}
     return result;
   };
   const textModelFor=interview=>parse(effectiveSession(interview).text_models,{})[effectiveSession(interview).provider]||defaultTextModel(effectiveSession(interview).provider,cli);
@@ -340,7 +340,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     db.prepare('UPDATE interviews SET title=?,auto_answer=?,provider=?,updated_at=? WHERE id=?').run(body.title === undefined ? row.title : text(body.title,'面试名称',120), body.autoAnswer === undefined ? row.auto_answer : body.autoAnswer ? 1 : 0, settings.provider, now(), row.id);
     db.prepare('UPDATE interviews SET mode=?,transcribe=?,audio_model=?,audio_window_seconds=?,auto_answer=? WHERE id=?').run(settings.mode,settings.mode==='transcript'?1:settings.transcribe?1:0,settings.audioModel,settings.audioWindowSeconds,settings.mode==='audio'?0:body.autoAnswer===undefined?row.auto_answer:body.autoAnswer?1:0,row.id);
     db.prepare('UPDATE interviews SET text_models=?,asr_model=? WHERE id=?').run(JSON.stringify(settings.textModels),settings.asrModel,row.id);
-    if(req.identity.role==='admin'&&req.identity.kind==='web')db.prepare('UPDATE interviews SET model_overrides=? WHERE id=?').run(JSON.stringify(overridePatch(parse(row.model_overrides,{}),body,row.user_id)),row.id);
+    if(req.identity.role==='admin'&&req.identity.kind==='web')db.prepare('UPDATE interviews SET model_overrides=? WHERE id=?').run(JSON.stringify(overridePatch(parse(row.model_overrides,{}),body,row.user_id,parse(row.text_models,{}))),row.id);
     if (body.autoAnswer === false) stopAuto(row.id); notifyInterview(row.id); res.json({ interview: interviewView(getSession(row.id)) });
   });
   async function transition(row, action) {
