@@ -34,9 +34,9 @@ Codex / Claude 是执行工具的名称，不代表实际模型。Claude 接入�
 
 终端中的 `claude --model 实际模型ID -p "测试问题"` 可用于验证该 CLI 的模型选择。DualLink 会把任务选择的模型作为 `--model` 参数传给对应 CLI；Codex 面试热进程使用本次请求的模型启动独立模型线程。
 
-Claude 使用百炼时，服务端需要取得同一套 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`，或供应商接受的 `ANTHROPIC_API_KEY`。这些是服务器环境，不在网页填写。`admin` 用户已有配置不会自动进入以 `duallink` 用户运行的服务。
+Claude 使用百炼等兼容供应商时，服务端需要取得同一套 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`，或供应商接受的 `ANTHROPIC_API_KEY`。可同时设置 `ANTHROPIC_MODEL` 和 `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `SONNET` / `OPUS` 映射；网页账号或会话选择的模型会以 `--model` 覆盖这些默认值。这些是服务器环境，不在网页填写。`admin` 用户已有配置不会自动进入以 `duallink` 用户运行的服务。
 
-需要加载既有 Claude 用户配置时，由管理员设置 `CLAUDE_LOAD_USER_CONFIG=true`，并让 `CLAUDE_CONFIG_DIR` 指向服务用户可访问的配置目录。默认关闭用户配置加载；开启前应检查其中的配置。需要加载自定义 Codex 提供方时，设置 `CODEX_LOAD_USER_CONFIG=true`，并准备服务用户可访问的 `CODEX_HOME`。服务仍关闭问答任务的工具和 MCP。
+需要加载既有 Claude 用户配置时，由管理员设置 `CLAUDE_LOAD_USER_CONFIG=true`，并让 `CLAUDE_CONFIG_DIR` 指向服务用户可访问的专用配置目录。默认关闭用户配置和所有项目设置；开启前应检查其中的配置。只复制必要文件，不要挂载完整个人家目录、不要放宽 `ProtectHome`。服务不会传递 `CLAUDE_CODE_SUBAGENT_MODEL`，并始终关闭问答任务的工具和 MCP、禁用会话持久化、启用安全模式。需要加载自定义 Codex 提供方时，设置 `CODEX_LOAD_USER_CONFIG=true`，并准备服务用户可访问的 `CODEX_HOME`。
 
 例如，现有百炼接口和 Key 已保存在 `/home/admin/.claude/settings.json` 时，可复用这一份配置，无需重新申请 Key 或登录 Anthropic：
 

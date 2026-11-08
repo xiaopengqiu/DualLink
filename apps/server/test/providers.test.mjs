@@ -71,6 +71,16 @@ test('provider output is bounded and errors redact credentials', async t => {
     assert.doesNotMatch(e.message, /secret-test-key/);
     return e.code === 'AI_PROCESS_FAILED';
   });
+  const authToken = 'test-third-party-auth-token-not-real';
+  const tokenFailure = await setup(t, 'unused', {
+    claudePrefixArgs: ['-e', 'process.stderr.write(`Authentication failed: ${process.env.ANTHROPIC_AUTH_TOKEN}`); process.exit(1)', '--'],
+    extraEnv: { ANTHROPIC_AUTH_TOKEN: authToken }
+  });
+  await assert.rejects(tokenFailure.run({ imagePath: tokenFailure.imagePath, jobDir: tokenFailure.jobDir, provider: 'claude', prompt: 'test' }), e => {
+    assert.doesNotMatch(e.message, new RegExp(authToken));
+    assert.match(e.message, /\[redacted\]/);
+    return e.code === 'AI_PROCESS_FAILED';
+  });
 });
 
 test('unknown providers and image paths outside a job are rejected before spawn', async t => {

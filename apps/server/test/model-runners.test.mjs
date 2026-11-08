@@ -20,18 +20,28 @@ test('request model overrides provider defaults and cannot inject additional arg
  }
 });
 
-test('Bailian Claude credentials reach native and Docker CLI without loading project settings',async t=>{
- const jobDir=await directory(t);const previous=process.env.ANTHROPIC_AUTH_TOKEN;
- process.env.ANTHROPIC_AUTH_TOKEN='fixture-bailian-token';
- t.after(()=>{if(previous===undefined)delete process.env.ANTHROPIC_AUTH_TOKEN;else process.env.ANTHROPIC_AUTH_TOKEN=previous;});
+test('Bailian Claude credentials and model aliases reach the CLI without leaking arbitrary or subagent variables',async t=>{
+ const jobDir=await directory(t);
+ const values={
+  ANTHROPIC_AUTH_TOKEN:'fixture-bailian-token',ANTHROPIC_BASE_URL:'https://fixture.invalid',ANTHROPIC_MODEL:'fixture-default',
+  ANTHROPIC_DEFAULT_HAIKU_MODEL:'fixture-haiku',ANTHROPIC_DEFAULT_SONNET_MODEL:'fixture-sonnet',ANTHROPIC_DEFAULT_OPUS_MODEL:'fixture-opus',
+  CLAUDE_CODE_SUBAGENT_MODEL:'must-not-pass',DUALLINK_ARBITRARY_TEST_ENV:'must-not-pass'
+ };
+ const previous=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));Object.assign(process.env,values);
+ t.after(()=>{for(const [key,value] of Object.entries(previous)){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
  const input={jobDir,provider:'claude',prompt:'test'};
  const native=await buildInvocation({},input);
- assert.equal(native.env.ANTHROPIC_AUTH_TOKEN,'fixture-bailian-token');
+ for(const key of ['ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL'])assert.equal(native.env[key],values[key]);
+ assert.equal(native.env.CLAUDE_CODE_SUBAGENT_MODEL,undefined);assert.equal(native.env.DUALLINK_ARBITRARY_TEST_ENV,undefined);
  assert.equal(native.args[native.args.indexOf('--setting-sources')+1],'');
+ assert.equal(native.args[native.args.indexOf('--tools')+1],'');
+ assert.equal(native.args[native.args.indexOf('--mcp-config')+1],'{"mcpServers":{}}');
+ assert(native.args.includes('--strict-mcp-config'));assert(native.args.includes('--no-session-persistence'));assert(native.args.includes('--safe-mode'));
  const userConfig=await buildInvocation({claudeLoadUserConfig:true},input);
  assert.equal(userConfig.args[userConfig.args.indexOf('--setting-sources')+1],'user');
  const docker=await buildInvocation({mode:'docker',claudeLoadUserConfig:true},input);
- assert(docker.args.includes('ANTHROPIC_AUTH_TOKEN'));
+ for(const key of ['ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL'])assert(docker.args.includes(key));
+ assert(!docker.args.includes('CLAUDE_CODE_SUBAGENT_MODEL'));assert(!docker.args.includes('DUALLINK_ARBITRARY_TEST_ENV'));
 });
 
 test('warm Codex uses each answer model while reusing one process',async t=>{
