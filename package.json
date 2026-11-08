@@ -1,6 +1,6 @@
 {
   "name": "dual-link",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "private": true,
   "description": "Self-hosted PC to iPad screenshot assistant",
   "workspaces": [

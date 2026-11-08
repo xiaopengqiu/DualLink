@@ -24,7 +24,7 @@ async function buildLauncher(t,input){
 test('installed update verifies checksum and launches fixed NSIS arguments without a shell',async t=>{
  const input=await fixture(t),calls=[];let unref=false;
  const result=await helpers().prepareUpdateInstall({...input,kind:'installed',spawnImpl:(command,args,options)=>{calls.push({command,args,options});const child=new EventEmitter();child.unref=()=>{unref=true;};process.nextTick(()=>child.emit('spawn'));return child;}});
- assert.equal(result.started,true);assert.equal(unref,true);assert.equal(calls[0].command,input.filePath);assert.deepEqual(calls[0].args,['--updated','/S','--force-run']);assert.equal(calls[0].options.shell,false);assert.equal(calls[0].options.windowsHide,true);assert.equal(calls[0].options.detached,true);
+ assert.equal(result.started,true);assert.equal(unref,true);assert.equal(calls[0].command,await fs.realpath(input.filePath));assert.deepEqual(calls[0].args,['--updated','/S','--force-run']);assert.equal(calls[0].options.shell,false);assert.equal(calls[0].options.windowsHide,true);assert.equal(calls[0].options.detached,true);
 });
 
 test('tampered or out-of-cache executables fail before any process starts',async t=>{

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -155,7 +155,7 @@ test('multi-screenshot invocation preserves image order for Codex flags and Clau
   const input = { jobDir, imagePaths: [second, imagePath], provider: 'codex', prompt: 'same question' };
   const codex = await module.buildInvocation({}, input);
   const flags = codex.args.flatMap((value, i) => value === '--image' ? [codex.args[i + 1]] : []);
-  assert.deepEqual(flags, [second, imagePath]);
+  assert.deepEqual(flags, await Promise.all([second, imagePath].map(file=>realpath(file))));
   const docker = await module.buildInvocation({ mode: 'docker' }, input);
   assert.deepEqual(docker.args.flatMap((value, i) => value === '--image' ? [docker.args[i + 1]] : []), ['/job/second.jpg', '/job/screen.png']);
   const claude = await module.buildInvocation({}, { ...input, provider: 'claude' });

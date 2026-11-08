@@ -1,8 +1,8 @@
 # 双端互联 · Dual Link
 
-下载客户端、完整源码包与编译后的网页：[v1.5.1 发布页面](https://github.com/xiaopengqiu/DualLink/releases/tag/v1.5.1)。编译产物通过 GitHub Releases 分发；Git 仓库保存源码，依赖通过 `npm ci` 安装。
+下载客户端、完整源码包与编译后的网页：[v1.5.2 发布页面](https://github.com/xiaopengqiu/DualLink/releases/tag/v1.5.2)。编译产物通过 GitHub Releases 分发；Git 仓库保存源码，依赖通过 `npm ci` 安装。
 
-自托管的 Windows → iPad 截图与实时语音问答工具。PC 快捷键截图或采集会议/麦克风声音，Linux 服务结合当前账号的 Prompt、知识库和会话历史生成回答，iPad 网页显示并保存结果。当前版本 **1.5.1**。
+自托管的 Windows → iPad 截图与实时语音问答工具。PC 快捷键截图或采集会议/麦克风声音，Linux 服务结合当前账号的 Prompt、知识库和会话历史生成回答，iPad 网页显示并保存结果。当前版本 **1.5.2**。
 
 1.5新增[手动触发多图整题回答](docs/SCREENSHOT_BATCHES.md)：截图先存本机，可预览/移除；按Ctrl+Alt+Enter把当前全部截图作为同一道题提交，只生成一个整体回答。后续截图进入下一题，重启/断网保持批次和顺序，重试不重复创建任务。升级顺序为Linux服务端→PC客户端→刷新iPad网页。
 
