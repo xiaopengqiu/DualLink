@@ -387,3 +387,12 @@ test('configured administrator Claude credentials reach the real screenshot CLI 
   const secret=randomBytes(32).toString('hex');const pairing=await(await s.api('/pairings',null,'POST',{name:'Admin PC',deviceSecret:secret})).json();await s.api('/pairings/approve',a,'POST',{code:pairing.code});
   assert.equal((await s.api('/account/ai',{headers:{Authorization:'Bearer '+secret}})).status,403);
 });
+
+test('paired administrator devices cannot override fresh web defaults with stale cached models',async t=>{
+  const s=await setup(t),a=await s.login();
+  await s.api('/account/ai',a,'PUT',{profiles:{'screenshot.codex':{model:'web-model-current'}},defaults:{screenshotProvider:'codex',textProvider:'codex'}});
+  const secret=randomBytes(32).toString('hex'),pair=await(await s.api('/pairings',null,'POST',{name:'Cache test PC',deviceSecret:secret})).json();await s.api('/pairings/approve',a,'POST',{code:pair.code});const device={headers:{Authorization:'Bearer '+secret}};
+  const form=new FormData();form.set('captureId',randomUUID());form.set('image',new Blob([pixel],{type:'image/png'}),'fixture.png');form.set('provider','claude');form.set('model','stale-client-model');
+  const result=await s.api('/captures',device,'POST',form);assert.equal(result.status,201);const body=await result.json();assert.equal(body.task.provider,'codex');assert.equal(body.task.model,'web-model-current');
+  const state=await(await s.api('/account/ai',a)).json();assert.equal(state.profiles['screenshot.codex'].effectiveModel,'web-model-current');assert.equal(state.profiles['screenshot.codex'].modelSource,'管理员网页配置');
+});

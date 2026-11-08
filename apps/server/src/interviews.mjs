@@ -47,7 +47,21 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   const customAsrModelsAllowed=!process.env.ASR_MODELS,customAudioModelsAllowed=omniConfig.customModelsAllowed;
   const serverDefaults={mode:process.env.INTERVIEW_DEFAULT_MODE||'transcript',provider:defaultProvider,textModels:{codex:'',claude:'',bailian:''},asrModel:asrConfig.model,transcribe:true,audioModel:omniModel,audioWindowSeconds:boundedNumber(process.env.INTERVIEW_AUDIO_WINDOW_SECONDS,120,15,180)};
   const defaults=id=>{const value={...serverDefaults,...parse(db.prepare('SELECT value FROM interview_preferences WHERE user_id=?').get(accountAi?.owner() || id)?.value,{})};return {...value,asrModel:value.asrModel||asrConfig.model,audioModel:value.audioModel||omniModel};};
-  const textModelFor=interview=>parse(interview.text_models,{})[interview.provider]||defaults(interview.user_id).textModels?.[interview.provider]||defaultTextModel(interview.provider,cli);
+  // Legacy copied defaults are not explicit overrides. Resolve inherited values at submission time.
+  const effectiveSession=row=>{
+    if(!row)return row;
+    const inherited=defaults(row.user_id), overrides=parse(row.model_overrides,{});
+    const models={...inherited.textModels,...overrides.textModels};
+    for(const provider of validProviders)models[provider]=models[provider]||defaultTextModel(provider,cli);
+    return {...row,provider:overrides.provider||inherited.provider,text_models:JSON.stringify(models),asr_model:overrides.asrModel||inherited.asrModel,audio_model:overrides.audioModel||inherited.audioModel};
+  };
+  const overridePatch=(current,body,uid)=>{
+    const result={...current,textModels:{...current.textModels}},inherited=defaults(uid);
+    for(const key of ['provider','asrModel','audioModel'])if(body[key]!==undefined){if(!body[key]||body[key]===inherited[key])delete result[key];else result[key]=body[key];}
+    if(body.textModels)for(const [provider,model] of Object.entries(body.textModels)){if(!model||model===inherited.textModels?.[provider])delete result.textModels[provider];else result.textModels[provider]=model;}
+    return result;
+  };
+  const textModelFor=interview=>parse(effectiveSession(interview).text_models,{})[effectiveSession(interview).provider]||defaultTextModel(effectiveSession(interview).provider,cli);
   const validateSettings=(body,current,canConfigure=true)=>{
     if(!canConfigure)body=Object.fromEntries(Object.entries(body).filter(([key])=>!['provider','textModels','asrModel','audioModel'].includes(key)));
     const result={...current};
@@ -62,9 +76,9 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   };
   const router = express.Router(), active = new Map(), auto = new Map();
   let closed = false, pumping = false;
-  const own = (id, userId) => { const row = db.prepare('SELECT * FROM interviews WHERE id=? AND user_id=?').get(id, userId); if (!row) fail(404, '面试会话不存在'); return row; };
+  const own = (id, userId) => { const row = db.prepare('SELECT * FROM interviews WHERE id=? AND user_id=?').get(id, userId); if (!row) fail(404, '面试会话不存在'); return effectiveSession(row); };
   const user = id => db.prepare('SELECT * FROM users WHERE id=?').get(id);
-  const interviewView = row => ({ id: row.id, title: row.title, status: row.status, provider: row.provider,textModels:modelMap(parse(row.text_models,{})),asrModel:row.asr_model||asrConfig.model, promptId: row.prompt_id, promptName: row.prompt_name, autoAnswer: !!row.auto_answer, mode:row.mode,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds,audioAvailable:!!db.prepare('SELECT seq FROM interview_audio_frames WHERE session_id=? AND byte_offset IS NOT NULL LIMIT 1').get(row.id), deviceId: row.device_id, recordingStatus: row.recording_status, error: row.error || null, createdAt: row.created_at, endedAt: row.ended_at, updatedAt: row.updated_at });
+  const interviewView = input => { const row=effectiveSession(input);return ({ id: row.id, title: row.title, status: row.status, provider: row.provider,textModels:modelMap(parse(row.text_models,{})),textModelSources:Object.fromEntries(validProviders.map(p=>[p,parse(row.model_overrides,{}).textModels?.[p]?'本场显式覆盖':defaults(row.user_id).textModels?.[p]?'管理员网页配置':'服务器默认'])),asrModel:row.asr_model||asrConfig.model, promptId: row.prompt_id, promptName: row.prompt_name, autoAnswer: !!row.auto_answer, mode:row.mode,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds,audioAvailable:!!db.prepare('SELECT seq FROM interview_audio_frames WHERE session_id=? AND byte_offset IS NOT NULL LIMIT 1').get(row.id), deviceId: row.device_id, recordingStatus: row.recording_status, error: row.error || null, createdAt: row.created_at, endedAt: row.ended_at, updatedAt: row.updated_at });};
   const segmentView = row => ({ id: row.id, sessionId: row.session_id, track: row.track, segmentId: row.segment_key, text: row.text, startMs: row.start_ms, endMs: row.end_ms, final: !!row.final, revision: row.revision, replay: !!row.replay, createdAt: row.created_at, updatedAt: row.updated_at });
   const questionView = row => ({ id: row.id, sessionId: row.session_id, text: row.text, segmentIds: parse(row.segment_ids),audioRange:row.audio_start_ms===null?null:{startMs:row.audio_start_ms,endMs:row.audio_end_ms},audioTruncated:!!row.audio_truncated, revision: row.revision, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at });
   const answerView = row => {
@@ -72,7 +86,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     return { id: row.id, sessionId: row.session_id, questionId: row.question_id, questionRevision: row.question_revision, provider: row.provider,model:row.model||null,mode:row.mode,audioModel:row.audio_model, status: row.status, text: row.text, error: row.error || null, contextSnapshotId: row.context_snapshot_id, usage: parse(row.usage, null), createdAt: row.created_at, updatedAt: row.updated_at,
       sources:context?parse(context.sources):[],contextSummary:context?{id:context.id,summary:context.summary,segmentIds:parse(context.segment_ids),watermark:context.watermark}:null };
   };
-  const getSession = id => db.prepare('SELECT * FROM interviews WHERE id=?').get(id);
+  const getSession = id => effectiveSession(db.prepare('SELECT * FROM interviews WHERE id=?').get(id));
   const event = (sessionId, value) => { const row = getSession(sessionId); if (row) publish(row.user_id, { sessionId, ...value }); };
   const notifyInterview = id => { const row = getSession(id); if (row) event(id, { type: 'interview.updated', interview: interviewView(row) }); };
   const notifyAnswer = id => { const row = db.prepare('SELECT * FROM interview_answers WHERE id=?').get(id); if (row) event(row.session_id, { type: 'interview.answer', answer: answerView(row) }); };
@@ -100,6 +114,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     }
   };
   function queueAnswer(interview, question) {
+    interview=effectiveSession(interview);
     const id = randomUUID(), timestamp = now();
     const mode=question.origin==='trigger_audio'?'audio':'transcript';
     let cancelled;
@@ -274,11 +289,11 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   const prepare = interview => { if (interview.mode==='transcript' && textRunner.prepareSession && interview.status === 'recording') void Promise.resolve(textRunner.prepareSession({ userId: interview.user_id, sessionId: interview.id,provider:interview.provider,model:textModelFor(interview)||undefined })).catch(() => { /* A model failure never masquerades as an ASR recording failure. */ }); };
   router.get('/config', (req, res) => res.json({ asrTransport:effectiveAsr().transport,asrChunkSeconds:Number(effectiveAsr().chunkSeconds)||4, configured:hasAsr(), model: asrConfig.model,asrModel:asrConfig.model,asrModels,customAsrModelsAllowed,customAudioModelsAllowed, region: asrConfig.region, sampleRate: 16000, maxSessionMinutes,maxDailyMinutes, rawAudioRetentionDays: retentionDays,audioConfigured:hasAudio(),audioModels,defaults:defaults(req.identity.userId), autoAnswerAvailable: true, providers: ['codex','claude', ...(accountAi?.profile('transcript.bailian').apiKey || process.env.INTERVIEW_TEXT_API_KEY || process.env.DASHSCOPE_API_KEY || asrConfig.apiKey || !lazyRunner ? ['bailian'] : [])], defaultProvider }));
   router.get('/preferences',(req,res)=>res.json({preferences:defaults(req.identity.userId)}));
-  router.patch('/preferences',(req,res)=>{if(req.identity.kind!=='web'||req.identity.role!=='admin')fail(403,'仅管理员可配置模型默认设置');const value=validateSettings(req.body,defaults(req.identity.userId));accountAi?.save({...Object.fromEntries(Object.entries(value.textModels).map(([provider,model])=>['transcript.'+provider,{model}])),asr:{model:value.asrModel},omni:{model:value.audioModel}});db.prepare('INSERT INTO interview_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(accountAi?.owner() || req.identity.userId,JSON.stringify(value));res.json({preferences:value});});
+  router.patch('/preferences',(req,res)=>{if(req.identity.kind!=='web'||req.identity.role!=='admin')fail(403,'仅管理员可配置模型默认设置');const value=validateSettings(req.body,defaults(req.identity.userId));db.transaction(()=>{accountAi?.save({...Object.fromEntries(Object.entries(value.textModels).map(([provider,model])=>['transcript.'+provider,{model}])),asr:{model:value.asrModel},omni:{model:value.audioModel}});db.prepare('INSERT INTO interview_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(accountAi?.owner() || req.identity.userId,JSON.stringify(value));})();res.json({preferences:value});});
   router.get('/', (req, res) => { const limit = Math.max(1,Math.min(200,parseInt(req.query.limit,10)||50)); res.json({ interviews: db.prepare('SELECT * FROM interviews WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit).map(interviewView) }); });
   router.post('/', (req, res) => {
     const owner = req.identity.userId, body = req.body;
-    const settings=validateSettings(body,defaults(owner),req.identity.role==='admin');const provider=settings.provider; if (!validProviders.includes(provider)) fail(400, '不支持的面试回答模型');
+    const settings=validateSettings(body,defaults(owner),req.identity.role==='admin'&&req.identity.kind==='web');const provider=settings.provider; if (!validProviders.includes(provider)) fail(400, '不支持的面试回答模型');
     if (body.autoAnswer !== undefined && typeof body.autoAnswer !== 'boolean') fail(400, '自动回答设置无效');
     const hotwords = body.hotwords || []; if (!Array.isArray(hotwords) || hotwords.length > 200 || hotwords.some(word => typeof word !== 'string' || !word.trim() || word.length > 80)) fail(400, '热词最多 200 个，每个不超过 80 个字符');
     let row;
@@ -292,6 +307,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       db.prepare('INSERT INTO interviews(id,user_id,device_id,title,status,provider,prompt_id,prompt_name,style_snapshot,knowledge_ids,hotwords,auto_answer,created_at,updated_at) VALUES(?,?,?,?,\'recording\',?,?,?,?,?,?,?,?,?)').run(id, owner, req.identity.deviceId || null, body.title ? text(body.title,'面试名称',120) : '面试 '+timestamp.slice(0,16).replace('T',' '), provider, prompt?.id || null, prompt?.name || '默认回答风格', prompt?.content || '中文，先给结论再给关键依据，不编造个人经历。', JSON.stringify(files), JSON.stringify(hotwords.map(word => word.trim())), settings.mode==='audio'||body.autoAnswer!==true ? 0 : 1, timestamp, timestamp);
       db.prepare('UPDATE interviews SET mode=?,transcribe=?,audio_model=?,audio_window_seconds=? WHERE id=?').run(settings.mode,settings.mode==='transcript'?1:settings.transcribe?1:0,settings.audioModel,settings.audioWindowSeconds,id);
       db.prepare('UPDATE interviews SET text_models=?,asr_model=? WHERE id=?').run(JSON.stringify(settings.textModels),settings.asrModel,id);
+      db.prepare('UPDATE interviews SET model_overrides=? WHERE id=?').run(JSON.stringify(req.identity.role==='admin'&&req.identity.kind==='web'?overridePatch({},body,owner):{}),id);
       row = getSession(id);
     })();
     prepare(row); notifyInterview(row.id); res.status(201).json({ interview: interviewView(row) });
@@ -314,8 +330,8 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     const row = own(req.params.id,req.identity.userId), body = req.body;
     if (body.autoAnswer !== undefined && typeof body.autoAnswer !== 'boolean') fail(400, '自动回答设置无效');
     if (body.provider !== undefined && !validProviders.includes(body.provider)) fail(400, '不支持的面试回答模型');
-    const previous={mode:row.mode,provider:row.provider,textModels:modelMap(parse(row.text_models,{})),asrModel:row.asr_model||asrConfig.model,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds};
-    const settings=validateSettings(body,previous,req.identity.role==='admin');
+    const previous={mode:row.mode,provider:row.provider,textModels:modelMap(parse(row.text_models,{})),textModelSources:Object.fromEntries(validProviders.map(p=>[p,parse(row.model_overrides,{}).textModels?.[p]?'本场显式覆盖':defaults(row.user_id).textModels?.[p]?'管理员网页配置':'服务器默认'])),asrModel:row.asr_model||asrConfig.model,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds};
+    const settings=validateSettings(body,previous,req.identity.role==='admin'&&req.identity.kind==='web');
     const changes=['mode','provider','transcribe','audioModel','audioWindowSeconds','textModels','asrModel'].some(key=>body[key]!==undefined&&JSON.stringify(settings[key])!==JSON.stringify(previous[key]));
     if(changes&&row.status==='recording')fail(409,'请先暂停录音再切换回答模式或音频配置');
     if(changes||body.provider!==undefined)db.prepare('UPDATE interviews SET config_version=config_version+1 WHERE id=?').run(row.id);
@@ -324,6 +340,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     db.prepare('UPDATE interviews SET title=?,auto_answer=?,provider=?,updated_at=? WHERE id=?').run(body.title === undefined ? row.title : text(body.title,'面试名称',120), body.autoAnswer === undefined ? row.auto_answer : body.autoAnswer ? 1 : 0, settings.provider, now(), row.id);
     db.prepare('UPDATE interviews SET mode=?,transcribe=?,audio_model=?,audio_window_seconds=?,auto_answer=? WHERE id=?').run(settings.mode,settings.mode==='transcript'?1:settings.transcribe?1:0,settings.audioModel,settings.audioWindowSeconds,settings.mode==='audio'?0:body.autoAnswer===undefined?row.auto_answer:body.autoAnswer?1:0,row.id);
     db.prepare('UPDATE interviews SET text_models=?,asr_model=? WHERE id=?').run(JSON.stringify(settings.textModels),settings.asrModel,row.id);
+    if(req.identity.role==='admin'&&req.identity.kind==='web')db.prepare('UPDATE interviews SET model_overrides=? WHERE id=?').run(JSON.stringify(overridePatch(parse(row.model_overrides,{}),body,row.user_id)),row.id);
     if (body.autoAnswer === false) stopAuto(row.id); notifyInterview(row.id); res.json({ interview: interviewView(getSession(row.id)) });
   });
   async function transition(row, action) {

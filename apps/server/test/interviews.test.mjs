@@ -438,3 +438,20 @@ test('blank session model inherits updated administrator defaults while explicit
   const second=await s.api(`/interviews/${session.id}/questions`,a,'POST',{text:'解释显式设置'});assert.equal(second.status,201);assert.equal((await second.json()).answer.model,'explicit-model');
   assert.equal(s.db.prepare('SELECT model FROM interview_answers WHERE id=?').get(body.answer.id).model,'gpt-6.1-sol');
 });
+
+test('web administrator changes replace inherited nonempty snapshots for existing sessions across providers and audio models',async t=>{
+  const s=await setup(t),a=await s.login();
+  await s.api('/account/ai',a,'PUT',{profiles:{'transcript.codex':{model:'model-A'},asr:{model:'asr-A'},omni:{model:'audio-A'}},defaults:{screenshotProvider:'codex',textProvider:'codex'}});
+  const session=await s.create(a);await s.api(`/interviews/${session.id}/pause`,a,'POST',{});
+  const before=await(await s.api(`/interviews/${session.id}/questions`,a,'POST',{text:'第一个问题'})).json();assert.equal(before.answer.model,'model-A');
+  await s.api('/account/ai',a,'PUT',{profiles:{'transcript.claude':{model:'model-B'},asr:{model:'asr-B'},omni:{model:'audio-B'}},defaults:{screenshotProvider:'codex',textProvider:'claude'}});
+  const current=(await(await s.api(`/interviews/${session.id}`,a)).json()).interview;
+  assert.equal(current.provider,'claude');assert.equal(current.textModels.claude,'model-B');assert.equal(current.asrModel,'asr-B');assert.equal(current.audioModel,'audio-B');assert.equal(current.textModelSources.claude,'管理员网页配置');
+  const after=await(await s.api(`/interviews/${session.id}/questions`,a,'POST',{text:'第二个问题'})).json();assert.equal(after.answer.provider,'claude');assert.equal(after.answer.model,'model-B');
+  assert.equal(s.db.prepare('SELECT model FROM interview_answers WHERE id=?').get(before.answer.id).model,'model-A');
+  await s.api(`/interviews/${session.id}`,a,'PATCH',{textModels:{claude:'session-only'}});
+  await s.api('/account/ai',a,'PUT',{profiles:{'transcript.claude':{model:'model-C'}}});
+  assert.equal((await(await s.api(`/interviews/${session.id}`,a)).json()).interview.textModels.claude,'session-only');
+  await s.api(`/interviews/${session.id}`,a,'PATCH',{textModels:{claude:''}});
+  assert.equal((await(await s.api(`/interviews/${session.id}`,a)).json()).interview.textModels.claude,'model-C');
+});

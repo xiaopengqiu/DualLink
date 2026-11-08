@@ -16,6 +16,8 @@ import { attachRealtime } from './realtime.mjs';
 import { createWorker } from './worker.mjs';
 import { diagnose } from './diagnostics.mjs';
 import { createInterviewService } from './interviews.mjs';
+import { asrConfiguration } from './asr.mjs';
+import { nativeAudioConfiguration } from './native-audio-providers.mjs';
 import { createAiSettings } from './ai-settings.mjs';
 import { modelId, modelMap, defaultTextModel } from './model-settings.mjs';
 
@@ -147,6 +149,11 @@ export async function createApp(options = {}) {
     for(const provider of ['codex','claude','bailian'])if(interview.textModels?.[provider]!==undefined)profiles['transcript.'+provider].model=interview.textModels[provider];
     if(interview.asrModel!==undefined)profiles.asr.model=interview.asrModel;
     if(interview.audioModel!==undefined)profiles.omni.model=interview.audioModel;
+    for(const [name,profile] of Object.entries(profiles)){
+      const provider=name.split('.')[1];
+      profile.effectiveModel=profile.model||(name==='asr'?asrConfiguration(accountAi.api('asr',options.asr||{})).model:name==='omni'?nativeAudioConfiguration(accountAi.api('omni',options.omni||{})).model:defaultTextModel(provider,options.cli));
+      profile.modelSource=profile.model?'管理员网页配置':'服务器默认';
+    }
     return profiles;
   };
   protectedRouter.get('/account/ai', adminOnly, (req,res)=>res.json({profiles:aiProfileView(),defaults:{screenshotProvider:screenshotPreferences(req.identity.userId).provider,textProvider:jsonParse(db.prepare('SELECT value FROM interview_preferences WHERE user_id=?').get(accountAi.owner())?.value,{}).provider || process.env.INTERVIEW_DEFAULT_PROVIDER || 'codex'}}));
@@ -177,8 +184,10 @@ export async function createApp(options = {}) {
     const current=screenshotPreferences(req.identity.userId), input=body.screenshot;
     const provider=input.provider===undefined?current.provider:input.provider;if(!['codex','claude'].includes(provider))fail(400,'截图执行方式无效');
     const value={provider,models:input.models===undefined?current.models:modelMap(input.models,current.models,['codex','claude'])};
+    db.transaction(()=>{
     accountAi.save(Object.fromEntries(Object.entries(value.models).map(([provider,model])=>['screenshot.'+provider,{model}])));
     db.prepare('INSERT INTO model_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(accountAi.owner() || req.identity.userId,JSON.stringify(value));
+    })();
     res.json({preferences:{screenshot:value}});
   });
   protectedRouter.put('/settings', browserOnly, (req, res) => {
@@ -286,7 +295,7 @@ export async function createApp(options = {}) {
   protectedRouter.get('/knowledge/:id/download', browserOnly, (req, res) => { const file = owned('knowledge', req.params.id, req.identity.userId); res.download(path.join(dataDir, file.path), file.name); });
   protectedRouter.delete('/knowledge/:id', browserOnly, asyncRoute(async (req, res) => { const file = owned('knowledge', req.params.id, req.identity.userId); db.prepare('DELETE FROM knowledge WHERE id=?').run(file.id); await unlink(path.join(dataDir, file.path)).catch(() => {}); res.json({ ok: true }); }));
 
-  function createTask(uid, captureId, input = {}, dedup = true, request = null) {
+  function createTask(uid, captureId, input = {}, dedup = true, request = null, allowModelOverride = false) {
     return db.transaction(() => {
       const captureIds = Array.isArray(captureId) ? captureId : [captureId];
       if (request) {
@@ -305,7 +314,7 @@ export async function createApp(options = {}) {
       if (db.prepare('SELECT count(*) AS n FROM quota_events WHERE user_id=? AND created_at>=?').get(uid, today).n >= u.daily_limit) fail(429, '已达到今日任务额度');
       if (db.prepare("SELECT count(*) AS n FROM tasks WHERE user_id=? AND status IN ('queued','running')").get(uid).n >= 5) fail(429, '待处理任务过多，请稍后再试');
       const preferences=screenshotPreferences(uid);
-      const mayConfigure=userRow(uid).role==='admin';
+      const mayConfigure=allowModelOverride&&userRow(uid).role==='admin';
       const provider = mayConfigure ? input.provider || preferences.provider : preferences.provider; if (!['codex', 'claude'].includes(provider)) fail(400, '模型服务不受支持');
       const configuredModel=preferences.models[provider] || accountAi.profile('screenshot.'+provider).model || defaultTextModel(provider,options.cli);
       const model = mayConfigure && input.model!==undefined ? modelId(input.model) || configuredModel : configuredModel;
@@ -374,7 +383,7 @@ export async function createApp(options = {}) {
         const race = db.prepare('SELECT * FROM captures WHERE user_id=? AND capture_key=?').get(uid, key);
         if (race) return;
         db.prepare('INSERT INTO captures(id,user_id,capture_key,device_id,path,mime,created_at) VALUES(?,?,?,?,?,?,?)').run(id, uid, key, deviceId, relative, `image/${metadata.format === 'jpeg' ? 'jpeg' : metadata.format}`, now());
-        task = analyze ? createTask(uid, id, req.body, false) : null;
+        task = analyze ? createTask(uid, id, req.body, false, null, req.identity.kind==='web') : null;
       })();
     } catch (e) { await unlink(path.join(dataDir, relative)).catch(() => {}); throw e; }
     const saved = db.prepare('SELECT * FROM captures WHERE user_id=? AND capture_key=?').get(uid, key);
@@ -408,7 +417,7 @@ export async function createApp(options = {}) {
     }
     if (total > 96 * 1024 * 1024) fail(400, '同一次回答的截图合计不能超过 96 MiB，请减少截图');
     liveIdentity(req);
-    const task = createTask(uid, captureIds, req.body, false, { id: requestId, fingerprint: requestFingerprint });
+    const task = createTask(uid, captureIds, req.body, false, { id: requestId, fingerprint: requestFingerprint },req.identity.kind==='web');
     realtime.publish(uid, { type: 'task.updated', task }); res.status(201).json({ task });
   }));
   protectedRouter.delete('/captures/:id', browserOnly, asyncRoute(async (req, res) => {
@@ -420,7 +429,7 @@ export async function createApp(options = {}) {
     })();
     await unlink(path.join(dataDir, c.path)).catch(() => {}); res.json({ ok: true });
   }));
-  protectedRouter.post('/captures/:id/analyze', (req, res) => { const c = owned('captures', req.params.id, req.identity.userId); const task = createTask(req.identity.userId, c.id, req.body); realtime.publish(req.identity.userId, { type: 'task.updated', task }); res.status(201).json({ task }); });
+  protectedRouter.post('/captures/:id/analyze', (req, res) => { const c = owned('captures', req.params.id, req.identity.userId); const task = createTask(req.identity.userId, c.id, req.body,true,null,req.identity.kind==='web'); realtime.publish(req.identity.userId, { type: 'task.updated', task }); res.status(201).json({ task }); });
   protectedRouter.get('/tasks', (req, res) => res.json({ tasks: db.prepare('SELECT * FROM tasks WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit(req)).map(taskView) }));
   protectedRouter.get('/tasks/:id', (req, res) => res.json({ task: taskView(owned('tasks', req.params.id, req.identity.userId)) }));
   protectedRouter.post('/tasks/:id/cancel', (req, res) => {
