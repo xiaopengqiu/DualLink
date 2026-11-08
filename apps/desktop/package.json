@@ -1,6 +1,6 @@
 {
   "name": "@dual-link/desktop",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "description": "双端互联 Windows 截图客户端",
   "author": "Dual Link",
@@ -36,7 +36,10 @@
     ],
     "asar": true,
     "extraResources": [
-      { "from": "../../.local/update-launcher.exe", "to": "update-launcher.exe" }
+      {
+        "from": "../../.local/update-launcher.exe",
+        "to": "update-launcher.exe"
+      }
     ],
     "electronDist": "../../node_modules/electron/dist",
     "win": {

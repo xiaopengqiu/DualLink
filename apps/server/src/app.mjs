@@ -82,7 +82,7 @@ export async function createApp(options = {}) {
   const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, audioRunner: options.audioRunner, omni: options.omni, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews });
   protectedRouter.use('/interviews', interviews.router);
 
-  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.4.0' }));
+  app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.4.1' }));
   const loginLimit = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: '登录尝试过多，请 15 分钟后重试' } });
   app.post('/api/auth/login', loginLimit, asyncRoute(async (req, res) => {
     const email = typeof req.body.email === 'string' ? req.body.email.toLowerCase().trim() : '';

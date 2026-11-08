@@ -1,5 +1,5 @@
 'use strict';
-const {app,BrowserWindow,ipcMain,safeStorage,Tray,Menu,globalShortcut,desktopCapturer,screen,nativeImage,shell,Notification,dialog}=require('electron');
+const {app,BrowserWindow,ipcMain,safeStorage,Tray,Menu,globalShortcut,desktopCapturer,screen,nativeImage,shell,Notification,dialog,net}=require('electron');
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const os=require('node:os');
@@ -11,6 +11,7 @@ const {DEFAULT_SETTINGS,normalizeCloudUrl,validateSettings,cropRect,screenshotSe
 const {CaptureQueue}=require('./lib/queue.cjs');
 const {AudioController}=require('./lib/audio-main.cjs');
 const {UpdateController}=require('./lib/updater.cjs');
+const {createUpdateFetch}=require('./lib/update-fetch.cjs');
 const {prepareUpdateInstall}=require('./lib/update-install.cjs');
 const {updateBlockReason}=require('./lib/update-policy.cjs');
 
@@ -242,7 +243,7 @@ app.whenReady().then(async()=>{
   app.setAppUserModelId('cn.duallink.client');await load();queue=new CaptureQueue(path.join(app.getPath('userData'),'pending'));await queue.load();
   audioController=new AudioController({root:path.join(app.getPath('userData'),'audio'),getOwner:()=>credential,api:(owner,route,options={})=>api(route,{...options,secret:owner.secret,baseUrl:owner.cloudUrl}),emit:(channel,data)=>channel==='audio.state'?changed():emit(channel,data),onUnauthorized:()=>revoked().catch(message)});
   const cacheDir=path.join(app.getPath('userData'),'updates');
-  updater=new UpdateController({currentVersion:app.getVersion(),kind:process.env.PORTABLE_EXECUTABLE_FILE?'portable':'installed',cacheDir,getBusyReason:updateBusyReason,onChange:()=>changed(),install:async update=>{
+  updater=new UpdateController({currentVersion:app.getVersion(),kind:process.env.PORTABLE_EXECUTABLE_FILE?'portable':'installed',cacheDir,fetchImpl:createUpdateFetch(net),getBusyReason:updateBusyReason,onChange:()=>changed(),install:async update=>{
     await persist();await queue.pending;
     const blocked=updateBusyReason();if(blocked)throw new Error(blocked);
     await prepareUpdateInstall({...update,cacheDir,portableExecutable:process.env.PORTABLE_EXECUTABLE_FILE,appPid:process.pid,launcherPath:path.join(process.resourcesPath,'update-launcher.exe')});
