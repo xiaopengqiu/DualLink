@@ -70,6 +70,12 @@ CLAUDE_CONFIG_DIR=/var/lib/dual-link/.claude
 CODEX_LOAD_USER_CONFIG=false
 CLAUDE_SAFE_MODE=true
 AI_RUNNER_IMAGE=dual-link-ai:1.0.0
+# Optional server-only settings for a Claude-compatible third-party provider.
+# ANTHROPIC_AUTH_TOKEN=
+# ANTHROPIC_BASE_URL=
+# ANTHROPIC_DEFAULT_HAIKU_MODEL=
+# ANTHROPIC_DEFAULT_SONNET_MODEL=
+# ANTHROPIC_DEFAULT_OPUS_MODEL=
 # Enable voice with a key and workspace from the same Model Studio region.
 # DASHSCOPE_API_KEY=
 # DASHSCOPE_WORKSPACE_ID=

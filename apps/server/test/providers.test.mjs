@@ -73,6 +73,54 @@ test('provider output is bounded and errors redact credentials', async t => {
   });
 });
 
+test('Claude passes only approved custom-provider variables and retains isolation arguments', async t => {
+  const values = {
+    ANTHROPIC_AUTH_TOKEN: 'test-auth-token-not-real',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'vendor-haiku-test',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'vendor-sonnet-test',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'vendor-opus-test',
+    CLAUDE_CODE_SUBAGENT_MODEL: 'must-not-pass',
+    DUALLINK_ARBITRARY_TEST_ENV: 'must-not-pass'
+  };
+  const original = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  t.after(() => {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const { jobDir } = await setup(t, 'claude');
+  const invocation = await module.buildInvocation({}, { jobDir, provider: 'claude', prompt: 'test' });
+  assert.equal(invocation.env.ANTHROPIC_AUTH_TOKEN, values.ANTHROPIC_AUTH_TOKEN);
+  assert.equal(invocation.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, values.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+  assert.equal(invocation.env.ANTHROPIC_DEFAULT_SONNET_MODEL, values.ANTHROPIC_DEFAULT_SONNET_MODEL);
+  assert.equal(invocation.env.ANTHROPIC_DEFAULT_OPUS_MODEL, values.ANTHROPIC_DEFAULT_OPUS_MODEL);
+  assert.equal(invocation.env.CLAUDE_CODE_SUBAGENT_MODEL, undefined);
+  assert.equal(invocation.env.DUALLINK_ARBITRARY_TEST_ENV, undefined);
+  assert.deepEqual(invocation.args, [
+    '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+    '--include-partial-messages', '--no-session-persistence', '--tools', '',
+    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '',
+    '--safe-mode'
+  ]);
+});
+
+test('Claude errors redact ANTHROPIC_AUTH_TOKEN values', async t => {
+  const authToken = 'test-third-party-auth-token-not-real';
+  const { run, ...input } = await setup(t, 'unused', {
+    claudePrefixArgs: ['-e', 'process.stderr.write(`Authentication failed: ${process.env.ANTHROPIC_AUTH_TOKEN}`); process.exit(1)', '--'],
+    extraEnv: { ANTHROPIC_AUTH_TOKEN: authToken }
+  });
+  await assert.rejects(run({ ...input, provider: 'claude', prompt: 'test' }), error => {
+    assert.equal(error.code, 'AI_PROCESS_FAILED');
+    assert.doesNotMatch(error.message, new RegExp(authToken));
+    assert.match(error.message, /\[redacted\]/);
+    return true;
+  });
+});
+
 test('unknown providers and image paths outside a job are rejected before spawn', async t => {
   const { run, ...input } = await setup(t, 'codex');
   await assert.rejects(run({ ...input, provider: 'unknown', prompt: 'x' }), /provider|提供方/i);

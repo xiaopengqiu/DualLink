@@ -83,6 +83,21 @@ sudo -u duallink -H /usr/local/bin/claude auth login
 
 认证过程按 CLI 提示操作。也可以直接使用环境变量提供的 API 凭据，无需交互登录。Claude 默认使用安全模式并关闭内建工具和 MCP；旧版本不认识参数时应升级。任务镜像锁定 Codex `0.167.0`、Claude Code `2.1.319`。
 
+如果已安装的 Claude CLI 使用 Claude 兼容的第三方服务，可以在 `/etc/dual-link.env` 复用同一组服务端环境变量，无需再次执行 Anthropic OAuth：
+
+```ini
+# 以下均只配置在服务器；不要提交真实值。
+ANTHROPIC_AUTH_TOKEN=YOUR_PROVIDER_TOKEN
+ANTHROPIC_BASE_URL=https://YOUR_PROVIDER_ENDPOINT
+ANTHROPIC_DEFAULT_HAIKU_MODEL=YOUR_HAIKU_ALIAS
+ANTHROPIC_DEFAULT_SONNET_MODEL=YOUR_SONNET_ALIAS
+ANTHROPIC_DEFAULT_OPUS_MODEL=YOUR_OPUS_ALIAS
+```
+
+只复制这组必要环境变量，不要复制整套 Claude settings，也不要为读取个人家目录而放宽 systemd 的 `ProtectHome`。Dual Link 不传递 `CLAUDE_CODE_SUBAGENT_MODEL`，以免受控问答间接启用另一模型。`CLAUDE_MODEL` 非空时会通过 `--model` 显式覆盖 CLI 的默认/别名选择；留空则由上述第三方模型映射和 CLI 默认值决定。此路径保持 `--setting-sources ''`、空工具列表、严格空 MCP、无会话持久化和安全模式；项目验证的 Claude Code `2.1.319` 与这些参数兼容。
+
+验证时仅检查变量是否存在，不要把 token 打印到终端或日志。先用 `sudo systemctl show dual-link --property=EnvironmentFiles` 等方式确认服务读取了环境文件，再以 `duallink` 身份发起一次真实的纯文本请求；只有真实请求成功才能同时证明端点、token 和模型别名有效。环境文件中的“已填写”状态本身不能证明供应商请求可用。
+
 `CODEX_LOAD_USER_CONFIG=false` 默认忽略用户自定义 Codex 配置和规则，只执行受控问答。若你依赖已有配置中的自定义提供方，可显式设为 `true`，并审查所加载配置；API 基址等环境配置也必须在服务账号下验证。模型名称可用 `CODEX_MODEL` / `CLAUDE_MODEL` 指定，留空使用 CLI 默认。
 
 如现有 CLI 过旧，可按官方 npm 包在系统路径安装本项目验证的版本：`npm install --global @openai/codex@0.167.0 @anthropic-ai/claude-code@2.1.319`。升级后应重新验证认证和带图调用。
