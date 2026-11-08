@@ -21,15 +21,16 @@ if(!app.requestSingleInstanceLock())app.quit();
 let win,tray,overlay,queue,credential=null,pendingPair=null,settings={...DEFAULT_SETTINGS,deviceName:os.hostname()};
 let quitting=false,capturing=false,uploading=false,socket,reconnectTimer,pairTimer,generation=0,reconnectAttempts=0;
 let lastImage=null,recent=[],peerCount=0,audioController,audioPermissionUntil=0,updater,updateTimer,activeActions=0;
+let screenshotSubmitPromise=null,uploadingBatchId=null,lastScreenshotTriggerAt=0;
 const directWaiters=new Map(),lanAttempted=new Set();
 const state={connected:false,connecting:false,error:'',secureStorage:false,pairing:null,user:null,device:null,queue:[],lastCapture:null,shortcutsError:''};
 const configPath=()=>path.join(app.getPath('userData'),'settings.json');
 const emit=(channel,data)=>{if(win&&!win.isDestroyed())win.webContents.send(channel,data);};
 function updateView(){return {...(updater?.view()||{phase:'idle',currentVersion:app.getVersion(),kind:process.env.PORTABLE_EXECUTABLE_FILE?'portable':'installed'}),supported:process.platform==='win32'&&app.isPackaged};}
-function updateBusyReason(){return updateBlockReason({capturing,uploading,activeActions,queueLength:queue?.items.length||0,audio:audioController?.view()||{}});}
+function updateBusyReason(){return updateBlockReason({capturing,uploading,activeActions:activeActions+(screenshotSubmitPromise?1:0),queueLength:queue?.batches.filter(x=>x.status!=='submitted').length||0,audio:audioController?.view()||{}});}
 function assertNotInstalling(){if(updater?.view().phase==='installing')throw new Error('正在安装更新，请等待客户端重启');}
 function assertUpdateSupported(){if(!updateView().supported)throw new Error('请使用已打包的 Windows 客户端进行升级');}
-function snapshot(){return {...state,settings,paired:!!credential,update:updateView(),queue:queue?.items.map(({captureId,createdAt,attempts,error,name,size,analyze})=>({captureId,createdAt,attempts,error,name,size,analyze}))||[],recent,peerCount,audio:audioController?.view()||{phase:'idle',interview:null,recording:false,recoveries:[]},displays:screen.getAllDisplays().map(d=>({id:String(d.id),name:d.label||`显示器 ${d.id}`,width:Math.round(d.bounds.width*d.scaleFactor),height:Math.round(d.bounds.height*d.scaleFactor),scaleFactor:d.scaleFactor}))};}
+function snapshot(){return {...state,settings,paired:!!credential,update:updateView(),queue:queue?.waitingUploads().filter(x=>x.deviceId===credential?.deviceId).map(({captureId,createdAt,attempts,error,name,size,analyze})=>({captureId,createdAt,attempts,error,name,size,analyze}))||[],screenshots:{pending:credential?queue?.staged(credential.deviceId).map(({captureId,createdAt,name,size,width,height})=>({captureId,createdAt,name,size,width,height}))||[]:[],batches:queue?.batches.filter(x=>x.deviceId===credential?.deviceId).map(({id,createdAt,captureIds,status,error,taskId})=>({id,createdAt,count:captureIds.length,status:uploadingBatchId===id?'uploading':status,error,taskId}))||[],capturing,submitting:!!screenshotSubmitPromise},recent,peerCount,audio:audioController?.view()||{phase:'idle',interview:null,recording:false,recoveries:[]},displays:screen.getAllDisplays().map(d=>({id:String(d.id),name:d.label||`显示器 ${d.id}`,width:Math.round(d.bounds.width*d.scaleFactor),height:Math.round(d.bounds.height*d.scaleFactor),scaleFactor:d.scaleFactor}))};}
 function changed(){emit('state',snapshot());updateTray();}
 function message(error){state.error=error instanceof Error?error.message:String(error);changed();}
 function encryptedStorageAvailable(){return safeStorage.isEncryptionAvailable()&&(process.platform!=='linux'||safeStorage.getSelectedStorageBackend()!=='basic_text');}
@@ -49,7 +50,7 @@ async function api(route,{method='GET',body,secret,timeout=20000,baseUrl=setting
   if(body&&!(body instanceof FormData)){headers['Content-Type']='application/json';body=JSON.stringify(body);}
   const response=await fetch(base+'/api'+route,{method,headers,body,signal:AbortSignal.timeout(timeout),redirect:'error'});
   const text=await response.text();let result;try{result=JSON.parse(text);}catch{throw new Error('服务未返回有效数据，请确认域名指向双端互联服务');}
-  if(!response.ok){const error=new Error(result.error||`请求失败 (${response.status})`);error.status=response.status;throw error;}return result;
+  if(!response.ok){const error=new Error(result.error||`请求失败 (${response.status})`);error.status=response.status;error.code=result.code;throw error;}return result;
 }
 function trustedWindow(event,kind='main'){
   const target=kind==='overlay'?overlay:win;
@@ -72,8 +73,8 @@ function updateTray(){if(!tray)return;tray.setToolTip(`双端互联 · ${state.c
   {label:'打开双端互联',click:showWindow},
   {label:`全屏截图  ${settings.fullShortcut}`,enabled:!!credential,click:()=>capture('full').catch(message)},
   {label:`框选截图  ${settings.regionShortcut}`,enabled:!!credential,click:()=>capture('region').catch(message)},
-  {label:`回答当前问题  ${settings.answerShortcut}`,enabled:!!credential&&!!audioController?.state.interview,click:()=>audioController.trigger().catch(message)},
-  {type:'separator'},{label:state.connected?'云端已连接':'云端未连接',enabled:false},{label:`待上传：${queue?.items.length||0} 张`,enabled:false},
+  {label:`回答当前问题  ${settings.answerShortcut}`,enabled:!!credential&&(!!queue?.staged(credential.deviceId).length||!!audioController?.state.interview),click:()=>answerTrigger().catch(message)},
+  {type:'separator'},{label:state.connected?'云端已连接':'云端未连接',enabled:false},{label:`本题待答：${credential?queue?.staged(credential.deviceId).length||0:0} 张`,enabled:false},{label:`待上传：${queue?.waitingUploads().length||0} 张`,enabled:false},
   {type:'separator'},{label:'退出',click:()=>{quitting=true;app.quit();}}
 ]));}
 function bindShortcuts(){
@@ -81,7 +82,7 @@ function bindShortcuts(){
   for(const [key,mode] of [['fullShortcut','full'],['regionShortcut','region']]){
     try{if(!globalShortcut.register(settings[key],()=>capture(mode).catch(message)))state.shortcutsError+=' '+settings[key]+' 已被占用。';}catch{state.shortcutsError+=' '+settings[key]+' 格式无效。';}
   }
-  try{if(!globalShortcut.register(settings.answerShortcut,()=>audioController?.trigger().catch(message)))state.shortcutsError+=' '+settings.answerShortcut+' 已被占用。';}catch{state.shortcutsError+=' '+settings.answerShortcut+' 格式无效。';}
+  try{if(!globalShortcut.register(settings.answerShortcut,()=>answerTrigger().catch(message)))state.shortcutsError+=' '+settings.answerShortcut+' 已被占用。';}catch{state.shortcutsError+=' '+settings.answerShortcut+' 格式无效。';}
 }
 function disconnect(){generation++;clearTimeout(reconnectTimer);if(socket){socket.removeAllListeners();socket.close();socket=null;}peerCount=0;state.connected=false;state.connecting=false;emit('network-reset',{});}
 async function revoked(){
@@ -153,52 +154,91 @@ function chooseRegion(image,display){
 }
 async function capture(mode){
   assertNotInstalling();
-  if(!credential)throw new Error('请先完成设备配对');if(capturing)return;capturing=true;const restore=win?.isVisible();
+  if(!credential)throw new Error('请先完成设备配对');if(capturing)return;capturing=true;changed();const restore=win?.isVisible();
   const captureOwner=credential;
   try{
-    if(settings.useAccountModels){try{const result=await api('/model-preferences',{timeout:3000});if(credential===captureOwner)state.screenshotPreferences=result.preferences?.screenshot||null;}catch(error){if(error.status===401||error.status===403)throw error;}}
-    if(credential!==captureOwner)return;
-    const modelSelection=screenshotSelection(settings,state.screenshotPreferences);
     if(win?.isVisible())win.hide();await new Promise(r=>setTimeout(r,160));
     const display=screen.getAllDisplays().find(d=>String(d.id)===settings.displayId)||screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     let image=await screenshot(display);if(mode==='region')image=await chooseRegion(image,display);if(!image||credential!==captureOwner)return;
     let bytes=image.toPNG(),mime='image/png',extension='png';if(bytes.length>12*1024*1024){bytes=image.toJPEG(88);mime='image/jpeg';extension='jpg';}
-    const job=await queue.add(bytes,{deviceId:captureOwner.deviceId,analyze:settings.analyze,...modelSelection,mime,name:`截图 ${new Date().toLocaleString('zh-CN').replace(/[/:]/g,'-')}.${extension}`});
+    const job=await queue.add(bytes,{deviceId:captureOwner.deviceId,analyze:false,mime,width:image.getSize().width,height:image.getSize().height,name:`截图 ${new Date().toLocaleString('zh-CN').replace(/[/:]/g,'-')}.${extension}`});
     if(credential!==captureOwner){await queue.complete(job.captureId);return;}
-    lastImage=image.toDataURL();state.lastCapture={captureId:job.captureId,createdAt:job.createdAt,width:image.getSize().width,height:image.getSize().height,status:'待上传'};
-    recent=[{...state.lastCapture},...recent].slice(0,8);changed();processQueue().catch(message);
-  }finally{capturing=false;if(restore)showWindow();}
+    lastImage=image.toDataURL();state.lastCapture={captureId:job.captureId,createdAt:job.createdAt,width:image.getSize().width,height:image.getSize().height,status:'待触发回答'};
+    recent=[{...state.lastCapture},...recent].slice(0,8);state.error='';changed();
+  }finally{capturing=false;if(restore)showWindow();changed();}
+}
+function submitScreenshots(){
+  assertNotInstalling();
+  if(screenshotSubmitPromise)return screenshotSubmitPromise;
+  if(!credential)return Promise.reject(new Error('请先完成设备配对'));
+  if(capturing)return Promise.reject(new Error('正在截图，请完成或取消截图后再触发回答'));
+  const owner=credential,captureIds=queue.staged(owner.deviceId).map(x=>x.captureId),selectionSettings=structuredClone(settings);
+  if(!captureIds.length)return Promise.reject(new Error('本题还没有待答截图，请先截图再触发回答'));
+  const operation=(async()=>{
+    let preferences=state.screenshotPreferences;
+    if(selectionSettings.useAccountModels){try{const result=await api('/model-preferences',{timeout:3000,secret:owner.secret,baseUrl:owner.cloudUrl});preferences=result.preferences?.screenshot||null;if(credential===owner)state.screenshotPreferences=preferences;}catch(error){if(error.status===401||error.status===403)throw error;}}
+    if(credential!==owner)throw new Error('设备配对已变化，截图提交已取消');
+    const batch=await queue.submit({deviceId:owner.deviceId,captureIds,...screenshotSelection(selectionSettings,preferences)});
+    lastScreenshotTriggerAt=Date.now();state.error='';for(const item of recent)if(captureIds.includes(item.captureId))item.status='排队提交';if(state.lastCapture&&captureIds.includes(state.lastCapture.captureId))state.lastCapture.status='排队提交';
+    changed();void processQueue().catch(message);return {batchId:batch.id,count:captureIds.length};
+  })();
+  screenshotSubmitPromise=operation;changed();void operation.finally(()=>{if(screenshotSubmitPromise===operation)screenshotSubmitPromise=null;changed();}).catch(()=>{});return operation;
+}
+async function answerTrigger(){
+  assertNotInstalling();
+  if(capturing)throw new Error('正在截图，请完成或取消截图后再触发回答');
+  if(screenshotSubmitPromise)return screenshotSubmitPromise;
+  if(credential&&queue.staged(credential.deviceId).length)return submitScreenshots();
+  if(Date.now()-lastScreenshotTriggerAt<600)return {ignored:true};
+  if(audioController?.state.interview&&['ready','recording','paused'].includes(audioController.state.phase))return audioController.trigger();
+  throw new Error('没有待答截图或进行中的录音，请先截图或开始录音');
+}
+async function discardScreenshot(id){
+  assertNotInstalling();if(!credential||!queue.staged(credential.deviceId).some(x=>x.captureId===id))throw new Error('待答截图不存在');await queue.discard(id);recent=recent.filter(x=>x.captureId!==id);if(state.lastCapture?.captureId===id){state.lastCapture=null;lastImage=null;}changed();return snapshot();
+}
+async function clearScreenshots(){
+  assertNotInstalling();if(!credential)throw new Error('请先配对设备');const ids=new Set(queue.staged(credential.deviceId).map(x=>x.captureId));await queue.clearStaged(credential.deviceId);recent=recent.filter(x=>!ids.has(x.captureId));if(ids.has(state.lastCapture?.captureId)){state.lastCapture=null;lastImage=null;}changed();return snapshot();
 }
 async function tryDirect(job,bytes){
   if(!settings.lanFirst||!peerCount)return false;
   return new Promise(resolve=>{
     const timer=setTimeout(()=>{directWaiters.delete(job.captureId);resolve(false);},2000);
-    directWaiters.set(job.captureId,()=>{clearTimeout(timer);directWaiters.delete(job.captureId);resolve(true);});
+    directWaiters.set(job.captureId,result=>{clearTimeout(timer);directWaiters.delete(job.captureId);resolve(result?.cloudCaptureId?result:false);});
     emit('capture-direct',{metadata:job,data:bytes.toString('base64')});
   });
 }
 async function processQueue(){
   if(uploading||!credential||quitting||updater?.view().phase==='installing')return;uploading=true;
   try{
-    for(const job of [...queue.items]){
-      if(!credential||job.deviceId!==credential.deviceId)continue;if(job.nextAttemptAt>Date.now())continue;
+    for(const batch of queue.batches.filter(x=>x.status!=='submitted')){
+      if(!credential||batch.deviceId!==credential.deviceId)continue;if(batch.nextAttemptAt>Date.now())break;
       const owner=credential;
+      uploadingBatchId=batch.id;changed();
       try{
-        const bytes=await queue.read(job.captureId);
-        let direct=false;
-        if(!lanAttempted.has(job.captureId)){lanAttempted.add(job.captureId);direct=await tryDirect(job,bytes);if(!settings.lanFirst)emit('capture-direct',{metadata:job,data:bytes.toString('base64')});}
-        if(credential!==owner)break;
-        if(!direct){
-          const form=new FormData();form.append('image',new Blob([bytes],{type:job.mime}),job.name);for(const key of ['captureId','deviceId','provider','model','analyze'])if(job[key]!==undefined&&job[key]!==null)form.append(key,String(job[key]));
-          await api('/captures',{method:'POST',body:form,timeout:45000});
+        for(const captureId of batch.captureIds){
+          if(credential!==owner)return;
+          const job=queue.items.find(x=>x.captureId===captureId&&x.batchId===batch.id);if(!job)throw new Error('本题截图缓存缺失，请检查客户端数据');if(job.uploadedId)continue;
+          const bytes=await queue.read(job.captureId);if(credential!==owner)return;
+          let direct=false;
+          if(!job.forceCloud&&!lanAttempted.has(job.captureId)){lanAttempted.add(job.captureId);direct=await tryDirect(job,bytes);}
+          if(credential!==owner)return;
+          let cloudId=direct?.cloudCaptureId;
+          if(!cloudId){
+            const form=new FormData();form.append('image',new Blob([bytes],{type:job.mime}),job.name);for(const key of ['captureId','deviceId','analyze'])if(job[key]!==undefined&&job[key]!==null)form.append(key,String(job[key]));
+            const result=await api('/captures',{method:'POST',body:form,timeout:45000,secret:owner.secret,baseUrl:owner.cloudUrl});cloudId=result.capture?.id;
+          }
+          if(credential!==owner)return;await queue.markUploaded(job.captureId,cloudId);lanAttempted.delete(job.captureId);const item=recent.find(x=>x.captureId===job.captureId);if(item)item.status=direct?'直传完成':'上传完成';if(state.lastCapture?.captureId===job.captureId)state.lastCapture.status=direct?'直传完成':'上传完成';changed();
         }
-        await queue.complete(job.captureId);lanAttempted.delete(job.captureId);const item=recent.find(x=>x.captureId===job.captureId);if(item)item.status=direct?'直传完成':'上传完成';if(state.lastCapture?.captureId===job.captureId)state.lastCapture.status=direct?'直传完成':'上传完成';state.error='';changed();
-      }catch(e){await queue.fail(job.captureId,e.message);if(e.status===401||e.status===403){await revoked();break;}message(e);}
+        if(credential!==owner)return;
+        const captureIds=batch.captureIds.map(id=>queue.items.find(x=>x.captureId===id)?.uploadedId);
+        const result=await api('/captures/analyze',{method:'POST',body:{captureIds,requestId:batch.id,provider:batch.provider,model:batch.model},secret:owner.secret,baseUrl:owner.cloudUrl,timeout:45000});
+        if(credential!==owner)return;await queue.completeBatch(batch.id,result.task?.id);state.error='';changed();
+      }catch(e){if(credential!==owner)return;const stale=['CAPTURE_NOT_FOUND','CAPTURE_FILE_MISSING'].includes(e.code);if(stale)await queue.resetUploads(batch.id);const explanation=stale?'部分云端截图已被移除，本机原图已保留，重试时将重新上传整题':e.status===404&&e.message==='接口不存在'?'云端尚未支持多图整题回答，请先更新服务端；截图已保留，更新后点击重试上传':e.message;await queue.failBatch(batch.id,explanation);if(e.status===401||e.status===403){await revoked();break;}message(explanation);break;}
     }
-  }finally{uploading=false;changed();}
+  }finally{uploading=false;uploadingBatchId=null;changed();}
 }
 function registerIpc(){
-  const mutations=new Set(['save-settings','start-pairing','unpair','capture','retry-uploads','reconnect','audio-refresh','audio-start','audio-resume','audio-pause','audio-end','audio-recover','audio-discard','audio-export-local']);
+  const mutations=new Set(['save-settings','start-pairing','unpair','capture','screenshots-submit','answer-trigger','screenshots-discard','screenshots-clear','retry-uploads','reconnect','audio-refresh','audio-start','audio-resume','audio-pause','audio-end','audio-recover','audio-discard','audio-export-local']);
   const handle=(channel,fn)=>ipcMain.handle(channel,async(event,...args)=>{trustedWindow(event);if(!mutations.has(channel))return fn(...args);assertNotInstalling();activeActions++;changed();try{return await fn(...args);}finally{activeActions--;changed();}});
   handle('get-state',()=>snapshot());handle('save-settings',saveSettings);handle('start-pairing',beginPairing);handle('unpair',unpair);
   handle('update-check',async()=>{assertUpdateSupported();await updater.check();return updateView();});
@@ -213,7 +253,9 @@ function registerIpc(){
     return updateView();
   });
   handle('capture',mode=>{if(!['full','region'].includes(mode))throw new Error('截图模式无效');return capture(mode);});
-  handle('retry-uploads',async()=>{for(const item of queue.items)item.nextAttemptAt=0;await processQueue();return snapshot();});
+  handle('screenshots-submit',submitScreenshots);handle('answer-trigger',answerTrigger);handle('screenshots-discard',discardScreenshot);handle('screenshots-clear',clearScreenshots);
+  handle('screenshots-preview',async id=>{const owner=credential,item=queue.staged(owner?.deviceId).find(x=>x.captureId===id);if(!owner||!item)throw new Error('待答截图不存在');const bytes=await queue.read(id);if(credential!==owner)return null;return `data:${item.mime};base64,${bytes.toString('base64')}`;});
+  handle('retry-uploads',async()=>{await queue.retry();await processQueue();return snapshot();});
   handle('last-image',()=>lastImage);
   handle('open-website',()=>shell.openExternal(normalizeCloudUrl(settings.cloudUrl)));
   handle('reconnect',()=>connect());
@@ -235,12 +277,13 @@ function registerIpc(){
   ipcMain.on('audio-frame',(event,input)=>{try{trustedWindow(event);void audioController.ingest(input||{}).catch(error=>audioController.fail(error));}catch{}});
   if(testMode)handle('audio-test-frame',input=>audioController.ingest(input||{}));
   ipcMain.on('signal',(event,input)=>{try{trustedWindow(event);if(!input||typeof input.targetPeerId!=='string'||JSON.stringify(input).length>128*1024)return;if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({type:'signal',targetPeerId:input.targetPeerId,payload:input.payload}));}catch{}});
-  ipcMain.on('direct-ack',(event,captureId)=>{try{trustedWindow(event);if(typeof captureId==='string')directWaiters.get(captureId)?.();}catch{}});
+  ipcMain.on('direct-ack',(event,result)=>{try{trustedWindow(event);if(result&&typeof result.captureId==='string'&&typeof result.cloudCaptureId==='string'&&result.cloudCaptureId.length<=100)directWaiters.get(result.captureId)?.(result);}catch{}});
   ipcMain.on('peer-count',(event,count)=>{try{trustedWindow(event);if(Number.isInteger(count)&&count>=0&&count<=100){peerCount=count;changed();}}catch{}});
 }
 app.on('second-instance',showWindow);
 app.whenReady().then(async()=>{
   app.setAppUserModelId('cn.duallink.client');await load();queue=new CaptureQueue(path.join(app.getPath('userData'),'pending'));await queue.load();
+  if(credential){const images=queue.items.filter(x=>x.deviceId===credential.deviceId);recent=images.slice(-8).reverse().map(x=>({captureId:x.captureId,createdAt:x.createdAt,width:x.width,height:x.height,status:x.batchId?'排队提交':'待触发回答'}));const latest=images.at(-1);if(latest){state.lastCapture=recent[0];try{lastImage=`data:${latest.mime};base64,${(await queue.read(latest.captureId)).toString('base64')}`;}catch{}}}
   audioController=new AudioController({root:path.join(app.getPath('userData'),'audio'),getOwner:()=>credential,api:(owner,route,options={})=>api(route,{...options,secret:owner.secret,baseUrl:owner.cloudUrl}),emit:(channel,data)=>channel==='audio.state'?changed():emit(channel,data),onUnauthorized:()=>revoked().catch(message)});
   const cacheDir=path.join(app.getPath('userData'),'updates');
   updater=new UpdateController({currentVersion:app.getVersion(),kind:process.env.PORTABLE_EXECUTABLE_FILE?'portable':'installed',cacheDir,fetchImpl:createUpdateFetch(net),getBusyReason:updateBusyReason,onChange:()=>changed(),install:async update=>{

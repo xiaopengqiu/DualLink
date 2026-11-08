@@ -64,6 +64,7 @@ try{
  await expect(page.getByText('默认配置已保存，新会话和电脑客户端可使用此配置',{exact:true})).toBeVisible();
  application=await electron.launch({...(process.env.DUALLINK_PACKAGED_EXE?{executablePath:process.env.DUALLINK_PACKAGED_EXE,args:[]}:{args:[path.join(root,'apps/desktop')]}),env:{...process.env,DUALLINK_TEST_MODE:'1',DUALLINK_TEST_USER_DATA:path.join(dataDir,'client')}});
  const desktop=await application.firstWindow();desktop.on('pageerror',e=>errors.push(e.message));
+ await desktop.waitForLoadState('domcontentloaded');
  await desktop.getByLabel('云服务地址').fill(origin);await desktop.getByLabel('电脑名称').fill('双模式测试 PC');await desktop.getByRole('button',{name:'生成配对码',exact:false}).click();await expect(desktop.locator('#pair-code')).toHaveText(/^[A-Z2-9]{8}$/);
  await page.getByRole('button',{name:'连接设备',exact:true}).click();await page.getByLabel('电脑配对码').fill(await desktop.locator('#pair-code').textContent());await page.getByRole('button',{name:'确认配对'}).click();await expect(desktop.locator('#connection-badge')).toHaveText('● 已连接',{timeout:15000});
  await page.getByRole('button',{name:'面试会话',exact:true}).click();

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
@@ -36,22 +36,29 @@ async function validateInput(input) {
   if (!['codex', 'claude'].includes(input.provider)) throw new ProviderError('INVALID_PROVIDER', '不支持的模型提供方 provider');
   if (typeof input.prompt !== 'string' || input.prompt.length > 160000) throw new ProviderError('INVALID_PROMPT', '提示词为空或超过限制');
   const job = await realpath(input.jobDir);
-  if (input.imagePath === undefined || input.imagePath === null) return { job, image: null, bytes: null };
-  const image = await realpath(input.imagePath).catch(() => path.resolve(input.imagePath));
-  const relative = path.relative(job, image);
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new ProviderError('INVALID_IMAGE_PATH', '图片必须位于当前任务目录内 (outside job rejected)');
-  const bytes = await readFile(image);
-  if (bytes.length > 12 * 1024 * 1024) throw new ProviderError('IMAGE_TOO_LARGE', '截图不能超过 12 MiB');
-  return { job, image, bytes };
+  const paths = input.imagePaths === undefined ? (input.imagePath == null ? [] : [input.imagePath]) : input.imagePaths;
+  if (!Array.isArray(paths) || (input.imagePaths !== undefined && paths.length === 0) || paths.length > 20 || paths.some(p => typeof p !== 'string' || !p)) throw new ProviderError('INVALID_IMAGES', '截图列表需包含 1–20 张图片');
+  const images = []; let total = 0;
+  for (const imagePath of paths) {
+    const image = await realpath(imagePath).catch(() => path.resolve(imagePath));
+    const relative = path.relative(job, image);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new ProviderError('INVALID_IMAGE_PATH', '图片必须位于当前任务目录内 (outside job rejected)');
+    if (images.some(item => item.image === image)) throw new ProviderError('INVALID_IMAGES', '截图列表不能包含重复图片');
+    const info = await stat(image);
+    if (!info.isFile() || info.size > 12 * 1024 * 1024) throw new ProviderError('IMAGE_TOO_LARGE', '截图不能超过 12 MiB');
+    total += info.size;
+    if (total > 96 * 1024 * 1024) throw new ProviderError('IMAGES_TOO_LARGE', '同一次回答的截图合计不能超过 96 MiB');
+    images.push({ image, bytes: await readFile(image) });
+  }
+  return { job, images };
 }
 
 /** Builds arguments without a shell. Only server-controlled options select an executable. */
 export async function buildInvocation(options = {}, input) {
-  const { job, image, bytes } = await validateInput(input);
+  const { job, images } = await validateInput(input);
   const docker = options.mode === 'docker';
   const provider = input.provider;
   const model = validateModel(input.model || (provider === 'codex' ? options.codexModel : options.claudeModel));
-  const imageArgument = image ? (docker ? `/job/${path.basename(image)}` : image) : null;
   let args;
   let stdin;
   if (provider === 'codex') {
@@ -62,7 +69,7 @@ export async function buildInvocation(options = {}, input) {
       args = ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '--json', '--cd', docker ? '/job' : job];
       if (!options.codexLoadUserConfig) args.push('--ignore-user-config', '--ignore-rules');
       if (model) args.push('--model', model);
-      if (image) args.push('--image', imageArgument);
+      for (const { image } of images) args.push('--image', docker ? `/job/${path.basename(image)}` : image);
       args.push('-'); stdin = input.prompt;
     }
   } else {
@@ -70,10 +77,12 @@ export async function buildInvocation(options = {}, input) {
     if (options.claudeSafeMode !== false) args.push('--safe-mode');
     if (options.claudeBare) args.push('--bare');
     if (model) args.push('--model', model);
-    const lower = image?.toLowerCase() || '';
-    const mediaType = lower.endsWith('.jpg') || lower.endsWith('.jpeg') ? 'image/jpeg' : lower.endsWith('.webp') ? 'image/webp' : 'image/png';
     const content = [{ type: 'text', text: input.prompt }];
-    if (image) content.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: bytes.toString('base64') } });
+    for (const { image, bytes } of images) {
+      const lower = image.toLowerCase();
+      const mediaType = lower.endsWith('.jpg') || lower.endsWith('.jpeg') ? 'image/jpeg' : lower.endsWith('.webp') ? 'image/webp' : 'image/png';
+      content.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: bytes.toString('base64') } });
+    }
     stdin = `${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`;
   }
   const env = environment(options);

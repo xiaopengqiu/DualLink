@@ -14,7 +14,7 @@ async function prepare(page, configured = true, initialStatus = 'recording', pag
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url()), path = url.pathname;
     const json = (data, status = 200) => route.fulfill({ status, json: data });
-    if (path === '/api/auth/login') { account = req.postDataJSON().email.startsWith('b@') ? 'b' : 'a'; return json({ user: { id: account, name: `用户${account}`, email: `${account}@test.example`, role: 'user', dailyLimit: 100 }, csrfToken: `csrf-${account}` }); }
+    if (path === '/api/auth/login') { account = req.postDataJSON().email.startsWith('b@') ? 'b' : 'a'; return json({ user: { id: account, name: `用户${account}`, email: `${account}@test.example`, role: options.admin?'admin':'user', dailyLimit: 100 }, csrfToken: `csrf-${account}` }); }
     if (path === '/api/auth/logout') return json({ ok: true });
     if (path === '/api/auth/me') return json({ error: '请登录' }, 401);
     if (path === '/api/config') return json({ providers: ['codex', 'claude'], defaultProvider: 'codex', autoAnalyze: true, iceServers: [], maxUploadBytes: 12582912 });
@@ -164,7 +164,7 @@ test('older transcript pages use the composite cursor and remain complete after 
 });
 
 test('account defaults save native mode without ASR and new sessions remain explicitly triggered',async({page})=>{
- const {preferenceSeen,seen}=await prepare(page,false,'ended',false,{audioConfigured:true});
+ const {preferenceSeen,seen}=await prepare(page,false,'ended',false,{audioConfigured:true,admin:true});
  await page.getByRole('button',{name:'面试会话',exact:true}).click();
  await page.getByText('默认面试配置',{exact:true}).click();
  await page.getByLabel('默认回答方式').selectOption('audio');
@@ -199,12 +199,12 @@ test('audio session triggers only on request and shows native answer with honest
 });
 
 test('screenshot models persist separately for each CLI and manual requests snapshot the selected model',async({page},testInfo)=>{
- await prepare(page,true,'ended');
+ await prepare(page,true,'ended',false,{admin:true});
  const saved=[],requests=[];
  await page.route('**/api/model-preferences',async route=>{
    const body=route.request().postDataJSON();saved.push(body);await route.fulfill({json:body});
  });
- await page.route('**/api/captures/capture-model/analyze',async route=>{
+ await page.route('**/api/captures/analyze',async route=>{
    const body=route.request().postDataJSON();requests.push(body);
    await route.fulfill({json:{task:{id:'model-task',captureId:'capture-model',provider:body.provider,model:body.model,status:'completed',answer:'模型已选择',promptName:'测试',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),sources:[]}}});
  });
@@ -229,7 +229,7 @@ test('screenshot models persist separately for each CLI and manual requests snap
 });
 
 test('interview defaults distinguish ASR API from per-CLI text models and preserve both when switching',async({page},testInfo)=>{
- const {preferenceSeen,seen}=await prepare(page,true,'ended',false,{audioConfigured:true});
+ const {preferenceSeen,seen}=await prepare(page,true,'ended',false,{audioConfigured:true,admin:true});
  await page.getByRole('button',{name:'面试会话',exact:true}).click();
  await page.getByText('默认面试配置',{exact:true}).click();
  await page.getByLabel('默认Codex 文字模型 ID').fill('gpt-flash');

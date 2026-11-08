@@ -28,12 +28,11 @@ test('complete screenshot workflow includes prompts, knowledge, manual review an
   await page.getByLabel('选择知识文件').setInputFiles({ name: `项目资料-${testInfo.project.name}.md`, mimeType: 'text/markdown', buffer: Buffer.from('# 项目代号青竹\n采用离线队列和幂等上传，保证截图传输可靠。') });
   await expect(page.getByRole('heading', { name: `项目资料-${testInfo.project.name}.md` })).toBeVisible();
   await page.getByRole('button', { name: '截图工作台', exact: true }).click();
-  await page.getByLabel('接收图片后自动分析').uncheck();
   await page.getByLabel('选择截图文件').setInputFiles({ name: 'question.png', mimeType: 'image/png', buffer: png });
-  await expect(page.getByRole('button', { name: '开始分析', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '回答这道题（1 张）', exact: true })).toBeEnabled();
   await expect.poll(() => page.locator('.capture-stage img').evaluate(img => img.naturalWidth)).toBe(1000);
   await page.getByLabel('补充说明').fill('项目代号青竹，解释 2+2。');
-  await page.getByRole('button', { name: '开始分析', exact: true }).click();
+  await page.getByRole('button', { name: '回答这道题（1 张）', exact: true }).click();
   const answer = page.getByRole('region', { name: 'AI 回答' });
   await expect(answer.getByRole('heading', { name: '自动化测试回答' })).toBeVisible();
   await expect(answer.getByText('已完成', { exact: true })).toBeVisible();
@@ -66,9 +65,9 @@ test('pairing and administrator account management work through the website', as
 
 test('an in-flight task can be cancelled and the website safely renders model markdown', async ({ page }) => {
   await login(page);
-  await page.getByLabel('接收图片后自动分析').check();
   await page.getByLabel('补充说明').fill('SLOW_TEST');
   await page.getByLabel('选择截图文件').setInputFiles({ name: 'cancel.png', mimeType: 'image/png', buffer: png });
+  await page.getByRole('button', { name: '回答这道题（1 张）', exact: true }).click();
   await page.getByRole('button', { name: '取消任务' }).click();
   await expect(page.getByRole('heading', { name: '任务已取消' })).toBeVisible();
 });
@@ -87,8 +86,8 @@ test('screenshot CLI model defaults persist independently and tasks retain the c
   await page.getByRole('combobox',{name:'截图执行方式',exact:true}).selectOption('codex');
   await expect(page.getByLabel('截图本次模型 ID')).toHaveValue('quality-codex');
   await page.getByRole('combobox',{name:'截图执行方式',exact:true}).selectOption('claude');
-  await page.getByLabel('接收图片后自动分析').check();
   await page.getByLabel('选择截图文件').setInputFiles({name:'models.png',mimeType:'image/png',buffer:png});
+  await page.getByRole('button', { name: '回答这道题（1 张）', exact: true }).click();
   await expect(page.getByRole('region',{name:'AI 回答'}).locator('.model-label')).toContainText('quality-claude');
   const {tasks}=await(await page.request.get('/api/tasks')).json();
   expect(tasks[0].provider).toBe('claude');expect(tasks[0].model).toBe('quality-claude');

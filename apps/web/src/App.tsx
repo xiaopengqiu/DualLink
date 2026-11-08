@@ -1,4 +1,6 @@
 import { captureId } from './uuid.mjs';
+import { latestCaptureTask, taskCaptureIds, taskCaptures } from './screenshot-batches.mjs';
+import { readScreenshotDraft, writeScreenshotDraft } from './screenshot-draft.mjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { ArrowDownToLine, ArrowRight, BookOpen, Check, CheckCheck, ChevronRight, CircleHelp, Copy, FileText, ImagePlus, LayoutDashboard, Link2, LoaderCircle, LogOut, Maximize2, Monitor, MoreHorizontal, Plus, RefreshCw, ScanLine, Search, Settings2, ShieldCheck, Sparkles, Square, Tablet, Trash2, Upload, Users, Wifi, WifiOff, X } from 'lucide-react';
@@ -46,7 +48,7 @@ export default function App() {
   const [screenshotModels, setScreenshotModels] = useState<Record<Provider,string>>({codex:'',claude:''});
   const [promptId, setPromptId] = useState('');
   const [question, setQuestion] = useState('');
-  const [autoAnalyze, setAutoAnalyze] = useState(true);
+  const [pendingScreenshotIds, setPendingScreenshotIds] = useState<string[]>([]);
   const [connection, setConnection] = useState<'connecting' | 'online' | 'offline'>('connecting');
   const [directCount, setDirectCount] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -59,10 +61,20 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<unknown>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const knowledgeRef = useRef<HTMLInputElement>(null);
-  const autoAnalyzeRef = useRef(autoAnalyze);
+  const analysisRequest = useRef<{ signature: string; requestId: string } | null>(null);
+  const pendingScreenshotIdsRef=useRef<string[]>([]);
+  const pendingScreenshotSizes=useRef<Record<string,number>>({});
+  const uploadingScreenshots=useRef(false),analyzingScreenshots=useRef(false);
   const userIdRef = useRef(user?.id);
-  autoAnalyzeRef.current = autoAnalyze;
   userIdRef.current = user?.id;
+
+  function persistScreenshotDraft(){try{writeScreenshotDraft(sessionStorage,userIdRef.current,{ids:pendingScreenshotIdsRef.current,sizes:pendingScreenshotSizes.current,request:analysisRequest.current});}catch{}}
+  function updatePendingScreenshots(change:string[]|((previous:string[])=>string[])){
+    const next=typeof change==='function'?change(pendingScreenshotIdsRef.current):change;
+    pendingScreenshotIdsRef.current=next;
+    pendingScreenshotSizes.current=Object.fromEntries(next.filter(id=>pendingScreenshotSizes.current[id]!==undefined).map(id=>[id,pendingScreenshotSizes.current[id]]));
+    setPendingScreenshotIds(next);persistScreenshotDraft();
+  }
 
   const notify = useCallback((message: string, kind: Notice['kind'] = 'success') => setNotice({ id: Date.now(), message, kind }), []);
   useEffect(() => { if (notice) { const timer = setTimeout(() => setNotice(null), notice.kind === 'error' ? 9000 : 4500); return () => clearTimeout(timer); } }, [notice]);
@@ -100,21 +112,25 @@ export default function App() {
     setConfig(null); setCaptures([]); setTasks([]); setSelectedId(null);
     setDevices([]); setPrompts([]); setKnowledge([]); setUsers([]);
     setLocalPreview(null); setQuestion(''); setHistoryQuery(''); setPromptId('');
-    setProvider('codex'); setScreenshotModels({codex:'',claude:''}); setAutoAnalyze(true); setBusy(''); setNotice(null); setDiagnostics(null);
+    setProvider('codex'); setScreenshotModels({codex:'',claude:''});
+    let draft={ids:[] as string[],sizes:{} as Record<string,number>,request:null as {signature:string;requestId:string}|null};
+    try{draft=readScreenshotDraft(sessionStorage,user?.id);}catch{}
+    pendingScreenshotIdsRef.current=draft.ids;pendingScreenshotSizes.current=draft.sizes;analysisRequest.current=draft.request;setPendingScreenshotIds(draft.ids);
+    uploadingScreenshots.current=false;analyzingScreenshots.current=false;setBusy(''); setNotice(null); setDiagnostics(null);
     setDirectCount(0); setConnection('connecting');
     setPromptDraft({ id: '', name: '', content: '', isDefault: false });
     setPage(initialPair ? 'devices' : initialInterview ? 'interviews' : 'workspace'); setPairCode(initialPair);
     if (!user) { setLoading(false); return; }
     let cancelled = false;
     setLoading(true);
-    void Promise.all([loadWorkspace(), api.request<AppConfig>('/config').then(result => { if (!cancelled) { setConfig(result); setProvider(result.screenshotPreferences?.provider||result.defaultProvider); setScreenshotModels({codex:result.screenshotPreferences?.models.codex||'',claude:result.screenshotPreferences?.models.claude||''}); setAutoAnalyze(result.autoAnalyze ?? true); } })]).catch(handleError).finally(() => { if (!cancelled) setLoading(false); });
+    void Promise.all([loadWorkspace(), api.request<AppConfig>('/config').then(result => { if (!cancelled) { setConfig(result); setProvider(result.screenshotPreferences?.provider||result.defaultProvider); setScreenshotModels({codex:result.screenshotPreferences?.models.codex||'',claude:result.screenshotPreferences?.models.claude||''}); } })]).catch(handleError).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [user?.id, initialPair, initialInterview, handleError, loadWorkspace]);
 
   useEffect(() => {
     if (!user || !config) return;
     const realtime = new RealtimeClient({
-      config, autoAnalyze: () => autoAnalyzeRef.current, onConnection: setConnection, onDirectCount: setDirectCount,
+      config, autoAnalyze: () => false, onConnection: setConnection, onDirectCount: setDirectCount,
       onCapture: capture => { setCaptures(previous => upsert(previous, capture)); setSelectedId(capture.id); setLocalPreview(previous => previous?.captureId === capture.captureId ? null : previous); },
       onTask: task => setTasks(previous => upsert(previous, task)),
       onDelta: (taskId, delta) => setTasks(previous => previous.map(task => task.id === taskId ? { ...task, answer: (task.answer || '') + delta } : task)),
@@ -144,36 +160,48 @@ export default function App() {
     catch (error) { if (userIdRef.current === accountId) handleError(error); return undefined; }
     finally { if (userIdRef.current === accountId) setBusy(current => current === key ? '' : current); }
   };
-  const selected = captures.find(capture => capture.id === selectedId);
-  const selectedTask = tasks.filter(task => task.captureId === selected?.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-  const filteredCaptures = captures.filter(capture => !historyQuery || `${capture.deviceName || ''} ${formatDate(capture.createdAt)} ${tasks.filter(task => task.captureId === capture.id).map(task => `${task.question} ${task.answer}`).join(' ')}`.toLowerCase().includes(historyQuery.toLowerCase()));
+  const selected = captures.find(capture => capture.id === selectedId) || tasks.flatMap(task=>task.captures||[]).find(capture=>capture.id===selectedId);
+  const selectedTask = latestCaptureTask(tasks, selected?.id);
+  const groupedCaptures = taskCaptures(selectedTask,captures);
+  const pendingScreenshots = pendingScreenshotIds.map(id=>captures.find(capture=>capture.id===id)).filter((capture):capture is Capture=>!!capture);
+  const filteredCaptures = captures.filter(capture => !historyQuery || `${capture.deviceName || ''} ${formatDate(capture.createdAt)} ${tasks.filter(task => taskCaptureIds(task).includes(capture.id)).map(task => `${task.question} ${task.answer}`).join(' ')}`.toLowerCase().includes(historyQuery.toLowerCase()));
   const onlineDevices = devices.filter(device => device.online).length;
 
-  const acceptUpload = async (file: File | undefined) => {
-    if (!file) return;
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) { notify('请选择 PNG、JPEG 或 WebP 图片', 'error'); return; }
-    if (file.size > (config?.maxUploadBytes || 12 * 1024 * 1024)) { notify('图片过大，请上传不超过 12 MB 的图片', 'error'); return; }
-    const form = new FormData(); form.append('image', file); form.append('captureId', captureId()); form.append('provider', provider); form.append('model', screenshotModels[provider].trim()); form.append('analyze', String(autoAnalyze)); if (promptId) form.append('promptId', promptId); if (question) form.append('question', question);
-    await perform('upload', async () => { const result = await api.request<CaptureResult>('/captures', { method: 'POST', body: form }); setCaptures(previous => upsert(previous, result.capture)); setSelectedId(result.capture.id); if (result.task) setTasks(previous => upsert(previous, result.task!)); setPage('workspace'); }, autoAnalyze ? '截图已提交，正在等待分析' : '截图已保存，可在预览后开始分析');
+  const acceptUpload = async (files: FileList | File[] | null) => {
+    if (!files?.length || uploadingScreenshots.current || analyzingScreenshots.current) return;
+    const picked=Array.from(files),accountId=userIdRef.current;
+    if (pendingScreenshotIdsRef.current.length+picked.length>20) { notify('一道题最多 20 张截图，请先提交或移除待回答截图','error'); return; }
+    if(Object.values(pendingScreenshotSizes.current).reduce((total,size)=>total+size,0)+picked.reduce((total,file)=>total+file.size,0)>96*1024*1024){notify('一道题截图合计不能超过 96 MB','error');return;}
+    for(const file of picked){
+      if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) { notify('请选择 PNG、JPEG 或 WebP 图片', 'error'); return; }
+      if (file.size > (config?.maxUploadBytes || 12 * 1024 * 1024)) { notify('图片过大，请上传不超过 12 MB 的图片', 'error'); return; }
+    }
+    uploadingScreenshots.current=true;
+    try{await perform('upload', async () => {
+      for(const file of picked){
+        if(userIdRef.current!==accountId)return;
+        const form = new FormData(); form.append('image', file); form.append('captureId', captureId()); form.append('analyze', 'false');
+        const result = await api.request<CaptureResult>('/captures', { method: 'POST', body: form });
+        if(userIdRef.current!==accountId)return;
+        setCaptures(previous => upsert(previous, result.capture)); setSelectedId(result.capture.id);pendingScreenshotSizes.current[result.capture.id]=file.size;updatePendingScreenshots(previous=>[...previous,result.capture.id]);setPage('workspace');
+      }
+    }, '截图已缓存到本次题目，确认截全后点击回答');}finally{if(userIdRef.current===accountId)uploadingScreenshots.current=false;}
     if (uploadRef.current) uploadRef.current.value = '';
   };
 
-  const updateAutoAnalyze = async (next: boolean) => {
-    const previous = autoAnalyze;
-    const currentUserId = userIdRef.current;
-    setAutoAnalyze(next);
-    setBusy('settings');
-    try {
-      await api.request('/settings', { method: 'PUT', body: { autoAnalyze: next } });
-      if (userIdRef.current === currentUserId) setConfig(current => current ? { ...current, autoAnalyze: next } : current);
-    } catch (error) {
-      if (userIdRef.current === currentUserId) { setAutoAnalyze(previous); handleError(error); }
-    } finally { setBusy(current => current === 'settings' ? '' : current); }
-  };
-
   const analyzeCapture = async () => {
-    if (!selected) return;
-    await perform('analyze', async () => { const { task } = await api.request<{ task: Task }>(`/captures/${selected.id}/analyze`, { method: 'POST', body: { provider, model:screenshotModels[provider].trim(), promptId: promptId || undefined, question } }); setTasks(previous => upsert(previous, task)); });
+    const ids=pendingScreenshotIdsRef.current.length?[...pendingScreenshotIdsRef.current]:selectedTask?taskCaptureIds(selectedTask):selected?[selected.id]:[];
+    if (!ids.length || uploadingScreenshots.current||analyzingScreenshots.current) return;
+    const body={captureIds:ids,provider,model:screenshotModels[provider].trim(),promptId:promptId||undefined,question};
+    const signature=JSON.stringify(body),accountId=userIdRef.current;
+    if(analysisRequest.current?.signature!==signature)analysisRequest.current={signature,requestId:captureId()};
+    const requestId=analysisRequest.current.requestId;
+    analyzingScreenshots.current=true;persistScreenshotDraft();
+    try{await perform('analyze', async () => {
+      const { task } = await api.request<{ task: Task }>('/captures/analyze', { method: 'POST', body: {...body,requestId} });
+      if(userIdRef.current!==accountId)return;
+      setTasks(previous => upsert(previous, task));analysisRequest.current=null;updatePendingScreenshots(previous=>previous.filter(id=>!ids.includes(id)));setSelectedId(ids[0]);
+    });}finally{if(userIdRef.current===accountId)analyzingScreenshots.current=false;}
   };
   const saveScreenshotPreferences = async (event:FormEvent) => {
     event.preventDefault();
@@ -190,7 +218,7 @@ export default function App() {
   };
   const deleteCapture = async () => {
     if (!selected || !window.confirm('删除这张截图及相关回答？此操作无法撤销。')) return;
-    await perform('deleteCapture', async () => { await api.request(`/captures/${selected.id}`, { method: 'DELETE' }); setCaptures(previous => previous.filter(capture => capture.id !== selected.id)); setTasks(previous => previous.filter(task => task.captureId !== selected.id)); setSelectedId(captures.find(capture => capture.id !== selected.id)?.id || null); }, '截图已删除');
+    await perform('deleteCapture', async () => { await api.request(`/captures/${selected.id}`, { method: 'DELETE' }); setCaptures(previous => previous.filter(capture => capture.id !== selected.id)); setTasks(previous => previous.filter(task => !taskCaptureIds(task).includes(selected.id)));updatePendingScreenshots(previous=>previous.filter(id=>id!==selected.id)); setSelectedId(captures.find(capture => capture.id !== selected.id)?.id || null); }, '截图已删除');
   };
   const copyAnswer = async () => { try { await navigator.clipboard.writeText(selectedTask?.answer || ''); notify('回答已复制'); } catch { notify('浏览器不允许自动复制，请长按选择回答内容', 'info'); } };
 
@@ -238,14 +266,16 @@ export default function App() {
           <div className="page-heading"><div><div className="eyebrow">CAPTURE. CONNECT. CLARIFY.</div><h1>让截图，成为答案<span>。</span></h1><p>捕捉电脑上的问题，结合你的知识与风格，接着往下想。</p></div><button className="button primary" onClick={() => uploadRef.current?.click()} disabled={busy === 'upload'}>{busy === 'upload' ? <LoaderCircle className="spin" size={17} /> : <ImagePlus size={18} />}上传截图</button></div>
           {user.role==='admin' && <details className="panel screenshot-preferences"><summary><Settings2 size={15}/><span>截图默认配置</span><small>与面试模型分别保存</small></summary><form onSubmit={saveScreenshotPreferences}><div className="screenshot-model-grid"><label>默认执行方式<select aria-label="截图默认执行方式" value={provider} onChange={event=>setProvider(event.target.value as Provider)}>{(config?.providers||['codex','claude']).map(item=><option key={item} value={item}>{providerName(item)} CLI</option>)}</select></label>{(['codex','claude'] as Provider[]).map(item=><label key={item}>{providerName(item)} 截图模型 ID<input aria-label={`${providerName(item)} 截图模型 ID`} maxLength={100} placeholder="留空使用服务器默认模型" value={screenshotModels[item]} onChange={event=>setScreenshotModels(current=>({...current,[item]:event.target.value}))}/></label>)}</div><div className="screenshot-model-footer"><span>可为截图选高质量模型。模型必须支持图片输入，并在对应 CLI 的接口中可用。下方本次配置可直接修改；保存后成为此账号默认值。</span><button className="button primary compact" disabled={busy==='screenshot-preferences'}>保存截图默认配置</button></div></form></details>}
           <div className="workspace-summary"><div><span className="summary-icon mint"><Monitor size={18} /></span><span><strong>{onlineDevices}<small> / {devices.length}</small></strong><small>电脑在线</small></span></div><div><span className="summary-icon lavender"><CheckCheck size={18} /></span><span><strong>{tasks.filter(task => task.status === 'completed').length}</strong><small>已完成回答</small></span></div><div><span className="summary-icon sand"><BookOpen size={18} /></span><span><strong>{knowledge.filter(file => file.status === 'ready').length}</strong><small>知识文件</small></span></div><div className="summary-hint"><span className={`tiny-dot ${directCount ? 'green' : 'neutral'}`} />{directCount ? `${directCount} 台设备已建立局域网直连` : '同一 Wi-Fi 下可自动尝试直连'}</div></div>
+          {pendingScreenshotIds.length>0&&<section className="panel web-screenshot-buffer" aria-label="网页待提交截图"><div className="web-buffer-heading"><strong>待提交截图 · {pendingScreenshotIds.length} 张</strong><span>按上传顺序作为同一道题；确认完整后点击“回答这道题”。</span><button className="text-button" disabled={busy==='upload'||busy==='analyze'} onClick={()=>updatePendingScreenshots([])}>清空本次题目</button></div><div className="web-buffer-images">{pendingScreenshots.map((capture,index)=><div key={capture.id}><button className="web-buffer-preview" onClick={()=>setSelectedId(capture.id)} aria-label={'预览待提交第 '+(index+1)+' 张截图'}><img src={capture.imageUrl} alt=""/><span>{index+1}</span></button><button className="text-button" disabled={busy==='upload'||busy==='analyze'} onClick={()=>updatePendingScreenshots(previous=>previous.filter(id=>id!==capture.id))} aria-label={'移除待提交第 '+(index+1)+' 张截图'}>移除</button></div>)}</div></section>}
           <div className="workspace-grid">
             <section className="panel capture-panel" aria-label="截图预览">
               <div className="panel-heading"><span className="panel-title"><ScanLine size={17} />截图预览</span><span className="panel-subtitle">{localPreview ? '局域网接收中' : selected ? formatTime(selected.createdAt) : '等待新截图'}</span></div>
-              <div className={`capture-stage ${selected || localPreview ? 'has-image' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); void acceptUpload(event.dataTransfer.files[0]); }}>
-                {localPreview ? <><img src={localPreview.url} alt="正在上传的局域网截图" /><div className="image-uploading"><Spinner label="正在同步到云端" /></div></> : selected ? <img src={selected.imageUrl} alt={`截图，${formatDate(selected.createdAt)}`} /> : loading ? <Spinner /> : <div className="capture-empty"><div className="capture-guide"><i /><i /><i /><i /><Monitor size={48} strokeWidth={1.1} /><span className="guide-spark"><Plus size={16} /></span></div><h3>下一张截图，从电脑开始</h3><p>按下客户端截图快捷键，<br />问题会自动出现在这里。</p><button className="text-button" onClick={() => navigate('devices')}>连接电脑 <ArrowRight size={14} /></button><span className="or-divider">或</span><button className="button secondary compact" onClick={() => uploadRef.current?.click()}><Upload size={14} />选择图片 / 拖拽上传</button></div>}
+              <div className={`capture-stage ${selected || localPreview ? 'has-image' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); void acceptUpload(event.dataTransfer.files); }}>
+                {localPreview ? <><img src={localPreview.url} alt="正在上传的局域网截图" /><div className="image-uploading"><Spinner label="正在同步到云端" /></div></> : selected ? <img src={selected.imageUrl} alt={`截图，${formatDate(selected.createdAt)}`} /> : loading ? <Spinner /> : <div className="capture-empty"><div className="capture-guide"><i /><i /><i /><i /><Monitor size={48} strokeWidth={1.1} /><span className="guide-spark"><Plus size={16} /></span></div><h3>下一张截图，从电脑开始</h3><p>按下客户端截图快捷键，<br />截图先缓存，确认后再触发回答。</p><button className="text-button" onClick={() => navigate('devices')}>连接电脑 <ArrowRight size={14} /></button><span className="or-divider">或</span><button className="button secondary compact" onClick={() => uploadRef.current?.click()}><Upload size={14} />选择图片 / 拖拽上传</button></div>}
               </div>
               <div className="capture-footer"><span><span className={`tiny-dot ${selected?.deviceId ? 'green' : 'neutral'}`} />{selected?.deviceName || (selected ? '网页上传' : '支持 PNG、JPEG、WebP · 最大 12 MB')}</span><div>{selected && <><a className="icon-button" href={selected.imageUrl} target="_blank" rel="noreferrer" aria-label="查看原图" title="查看原图"><Maximize2 size={15} /></a><button className="icon-button danger-hover" aria-label="删除截图" title="删除截图" onClick={() => void deleteCapture()} disabled={busy === 'deleteCapture'}><Trash2 size={15} /></button></>}</div></div>
-              <div className="capture-options"><label>截图执行方式<select disabled={user.role!=='admin'} value={provider} onChange={event => setProvider(event.target.value as Provider)}>{(config?.providers || ['codex', 'claude']).map(value => <option key={value} value={value}>{providerName(value)}</option>)}</select></label><label>本次模型 ID<input aria-label="截图本次模型 ID" disabled={user.role!=='admin'} maxLength={100} placeholder="留空使用服务器默认模型" value={screenshotModels[provider]} onChange={event=>setScreenshotModels(current=>({...current,[provider]:event.target.value}))}/></label><label>回答风格<select value={promptId} onChange={event => setPromptId(event.target.value)}><option value="">默认风格</option>{prompts.map(prompt => <option value={prompt.id} key={prompt.id}>{prompt.name}{prompt.isDefault ? ' · 默认' : ''}</option>)}</select></label><label className="check-label auto-analyze"><input type="checkbox" checked={autoAnalyze} disabled={busy === 'settings'} onChange={event => void updateAutoAnalyze(event.target.checked)} /><span>接收图片后自动分析</span><CircleHelp size={13}><title>电脑客户端设置为手动确认时，仍需手动开始分析。</title></CircleHelp></label></div>
+              {selectedTask&&taskCaptureIds(selectedTask).length>1&&<section className="question-screenshots" aria-label="本题关联截图"><div><strong>本题共 {taskCaptureIds(selectedTask).length} 张截图</strong><span>按截取顺序关联，仅生成一份统一回答</span></div><div className="question-screenshot-images">{groupedCaptures.map(capture=><button key={capture.id} className={selectedId===capture.id?'selected':''} onClick={()=>{setSelectedId(capture.id);setLocalPreview(null);}} aria-label={'查看本题第 '+(taskCaptureIds(selectedTask).indexOf(capture.id)+1)+' 张截图'} aria-pressed={selectedId===capture.id}><img src={capture.imageUrl} alt=""/><span>{taskCaptureIds(selectedTask).indexOf(capture.id)+1}</span></button>)}</div></section>}
+              <div className="capture-options"><label>截图执行方式<select disabled={user.role!=='admin'} value={provider} onChange={event => setProvider(event.target.value as Provider)}>{(config?.providers || ['codex', 'claude']).map(value => <option key={value} value={value}>{providerName(value)}</option>)}</select></label><label>本次模型 ID<input aria-label="截图本次模型 ID" disabled={user.role!=='admin'} maxLength={100} placeholder="留空使用服务器默认模型" value={screenshotModels[provider]} onChange={event=>setScreenshotModels(current=>({...current,[provider]:event.target.value}))}/></label><label>回答风格<select value={promptId} onChange={event => setPromptId(event.target.value)}><option value="">默认风格</option>{prompts.map(prompt => <option value={prompt.id} key={prompt.id}>{prompt.name}{prompt.isDefault ? ' · 默认' : ''}</option>)}</select></label><p className="manual-analysis-note">截图不会自动回答。电脑按回答快捷键后，关联截图会统一生成一份答案；网页上传需点击下方回答。</p></div>
             </section>
             <section className="panel answer-panel" aria-label="AI 回答">
               <div className="panel-heading"><span className="panel-title"><Sparkles size={17} />AI 回答</span><div className="answer-heading-right">{selectedTask && <><span className="model-label">{providerName(selectedTask.provider)}{selectedTask.model?` · ${selectedTask.model}`:" · 默认模型"}</span><StatusBadge status={selectedTask.status} /></>}{selectedTask?.answer && <button className="icon-button" aria-label="复制回答" title="复制回答" onClick={() => void copyAnswer()}><Copy size={15} /></button>}</div></div>
@@ -253,10 +283,10 @@ export default function App() {
                 {selectedTask?.answer ? <><div className="answer-meta"><span className="ai-avatar"><Sparkles size={15} /></span><strong>{providerName(selectedTask.provider)}</strong>{selectedTask.model&&<small>{selectedTask.model}</small>}<span>·</span><small>{selectedTask.promptName || '默认风格'}</small></div><div className="markdown"><Markdown remarkPlugins={[remarkGfm]} skipHtml components={{ a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{selectedTask.answer}</Markdown>{selectedTask.status === 'running' && <span className="writing-cursor" />}</div>{selectedTask.sources?.length > 0 && <details className="source-details"><summary><BookOpen size={14} />参考了 {selectedTask.sources.length} 个知识片段</summary>{selectedTask.sources.map((source, index) => <div key={`${source.name}-${index}`}><strong>{source.name}</strong><p>{source.excerpt}</p></div>)}</details>}</> : selectedTask?.status === 'running' || selectedTask?.status === 'queued' ? <div className="thinking-state"><div className="thinking-orbit"><Sparkles size={28} /></div><h3>{selectedTask.status === 'queued' ? '问题已就位，等待开始' : selectedTask.stage === 'extracting' ? '正在读取截图并检索知识库' : '正在生成回答'}</h3><p>{selectedTask.status === 'queued' ? '云端任务已保存，可以安心等待。' : '结合画面、回答风格和你的知识库，整理答案。'}</p><span className="thinking-dots"><i /><i /><i /></span></div> : selectedTask?.status === 'failed' ? <EmptyState icon={<RefreshCw size={27} />} title="这次分析未能完成" text={selectedTask.error || '请检查模型服务后重新尝试。'}><button className="button secondary compact" onClick={() => void mutateTask('retry')}>重新分析</button></EmptyState> : selectedTask?.status === 'cancelled' ? <EmptyState icon={<Square size={25} />} title="任务已取消" text="截图仍然保留，你可以随时重新开始。" /> : <EmptyState icon={<Sparkles size={29} strokeWidth={1.4} />} title={selected ? '准备好，就开始分析' : '好答案，从一个问题开始'} text={selected ? '选择模型与回答风格，补充需要关注的内容。' : '收到截图后，AI 会在这里为你整理思路与回答。'}><div className="answer-empty-tags"><span><BookOpen size={12} />你的知识</span><span><Sparkles size={12} />你的风格</span></div></EmptyState>}
                 {selectedTask?.retrievalWarning && <div className="retrieval-note"><BookOpen size={13} />{selectedTask.retrievalWarning}</div>}{selectedTask?.error && selectedTask.answer && <div className="inline-error">{selectedTask.error}</div>}
               </div>
-              <div className="question-composer"><label htmlFor="question">补充说明 <span>可选</span></label><textarea id="question" placeholder="例如：请重点解释解题思路，并给出一个例子…" value={question} onChange={event => setQuestion(event.target.value)} maxLength={8000} rows={2} /><div className="composer-footer"><span><ShieldCheck size={13} />仅在你的账号中保存</span>{selectedTask && ['queued', 'running'].includes(selectedTask.status) ? <button className="button secondary compact" disabled={busy === 'cancel'} onClick={() => void mutateTask('cancel')}><Square size={13} />取消任务</button> : <button className="button primary compact" disabled={!selected || !!localPreview || busy === 'analyze'} onClick={() => void analyzeCapture()}>{busy === 'analyze' ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{selectedTask ? '再次分析' : '开始分析'}<ArrowRight size={14} /></button>}</div></div>
+              <div className="question-composer"><label htmlFor="question">补充说明 <span>可选</span></label><textarea id="question" placeholder="例如：请重点解释解题思路，并给出一个例子…" value={question} onChange={event => setQuestion(event.target.value)} maxLength={8000} rows={2} /><div className="composer-footer"><span><ShieldCheck size={13} />仅在你的账号中保存</span>{!pendingScreenshotIds.length && selectedTask && ['queued', 'running'].includes(selectedTask.status) ? <button className="button secondary compact" disabled={busy === 'cancel'} onClick={() => void mutateTask('cancel')}><Square size={13} />取消任务</button> : <button className="button primary compact" disabled={(!selected && !pendingScreenshotIds.length) || !!localPreview || busy === 'analyze' || busy === 'upload'} onClick={() => void analyzeCapture()}>{busy === 'analyze' ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{pendingScreenshotIds.length ? '回答这道题（'+pendingScreenshotIds.length+' 张）' : selectedTask ? '再次分析' : '开始分析'}<ArrowRight size={14} /></button>}</div></div>
             </section>
           </div>
-          <section className="history-section"><div className="section-heading"><div><h2>最近截图 <span>{captures.length}</span></h2><p>每一次捕捉，都保留在你的工作空间。</p></div><label className="search-field"><Search size={15} /><input aria-label="搜索截图历史" placeholder="搜索历史回答" value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} /></label></div>{filteredCaptures.length > 0 ? <div className="capture-history">{filteredCaptures.map(capture => { const task = tasks.filter(item => item.captureId === capture.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]; return <button className={`history-card ${selectedId === capture.id ? 'selected' : ''}`} key={capture.id} onClick={() => { setSelectedId(capture.id); setQuestion(''); setLocalPreview(null); }}><div className="history-image"><img src={capture.imageUrl} alt={`历史截图 ${formatDate(capture.createdAt)}`} loading="lazy" />{selectedId === capture.id && <span><Check size={12} />当前预览</span>}</div><div className="history-card-info"><strong>{capture.deviceName || '网页截图'}</strong><small>{formatDate(capture.createdAt)}</small>{task ? <StatusBadge status={task.status} /> : <span className="status-badge status-manual">待分析</span>}</div></button>; })}</div> : <div className="history-empty"><ScanLine size={18} /><span>{historyQuery ? '没有找到匹配的截图' : '截图历史将显示在这里'}</span></div>}</section>
+          <section className="history-section"><div className="section-heading"><div><h2>最近截图 <span>{captures.length}</span></h2><p>每一次捕捉，都保留在你的工作空间。</p></div><label className="search-field"><Search size={15} /><input aria-label="搜索截图历史" placeholder="搜索历史回答" value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} /></label></div>{filteredCaptures.length > 0 ? <div className="capture-history">{filteredCaptures.map(capture => { const task = latestCaptureTask(tasks,capture.id); return <button className={`history-card ${selectedId === capture.id ? 'selected' : ''}`} key={capture.id} onClick={() => { setSelectedId(capture.id); setQuestion(''); setLocalPreview(null); }}><div className="history-image"><img src={capture.imageUrl} alt={`历史截图 ${formatDate(capture.createdAt)}`} loading="lazy" />{selectedId === capture.id && <span><Check size={12} />当前预览</span>}</div><div className="history-card-info"><strong>{capture.deviceName || '网页截图'}</strong><small>{formatDate(capture.createdAt)}</small>{task ? <StatusBadge status={task.status} /> : <span className="status-badge status-manual">待分析</span>}</div></button>; })}</div> : <div className="history-empty"><ScanLine size={18} /><span>{historyQuery ? '没有找到匹配的截图' : '截图历史将显示在这里'}</span></div>}</section>
         </>}
 
         {page === 'devices' && <>
@@ -297,7 +327,7 @@ export default function App() {
         <footer className="page-footer"><span>双端互联 <span>·</span> 你的截图，你的知识，你的答案。</span><span><ShieldCheck size={12} />自托管工作空间</span></footer>
       </main>
     </div>
-    <input ref={uploadRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" aria-label="选择截图文件" onChange={event => void acceptUpload(event.target.files?.[0])} />
+    <input ref={uploadRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" multiple aria-label="选择截图文件" onChange={event => void acceptUpload(event.target.files)} />
     <input ref={knowledgeRef} className="visually-hidden" type="file" accept=".txt,.md,.pdf,.docx" multiple aria-label="选择知识文件" onChange={event => void uploadKnowledge(event.target.files)} />
     {notice && <div className={`toast toast-${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>{notice.kind === 'success' ? <Check size={17} /> : <CircleHelp size={17} />}<span>{notice.message}</span><button aria-label="关闭提示" onClick={() => setNotice(null)}><X size={15} /></button></div>}
   </div>;

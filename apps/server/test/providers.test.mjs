@@ -148,3 +148,25 @@ test('Docker invocation mounts only the current job and explicitly configured cr
   assert.ok(!invocation.args.some(x => x.includes('docker.sock')));
   assert.ok(!invocation.args.some(x => x.includes('target=/data')));
 });
+
+test('multi-screenshot invocation preserves image order for Codex flags and Claude image blocks', async t => {
+  const { jobDir, imagePath } = await setup(t, 'codex');
+  const second = path.join(jobDir, 'second.jpg'); await writeFile(second, 'second-image');
+  const input = { jobDir, imagePaths: [second, imagePath], provider: 'codex', prompt: 'same question' };
+  const codex = await module.buildInvocation({}, input);
+  const flags = codex.args.flatMap((value, i) => value === '--image' ? [codex.args[i + 1]] : []);
+  assert.deepEqual(flags, [second, imagePath]);
+  const docker = await module.buildInvocation({ mode: 'docker' }, input);
+  assert.deepEqual(docker.args.flatMap((value, i) => value === '--image' ? [docker.args[i + 1]] : []), ['/job/second.jpg', '/job/screen.png']);
+  const claude = await module.buildInvocation({}, { ...input, provider: 'claude' });
+  const content = JSON.parse(claude.stdin).message.content;
+  assert.deepEqual(content.filter(c => c.type === 'image').map(c => [c.source.media_type, Buffer.from(c.source.data, 'base64').toString()]), [['image/jpeg', 'second-image'], ['image/png', 'image-fixture']]);
+});
+
+test('every multi-screenshot path and combined byte size are validated before building invocation', async t => {
+  const { jobDir, imagePath } = await setup(t, 'codex');
+  const input = { jobDir, provider: 'claude', prompt: 'same question' };
+  await assert.rejects(module.buildInvocation({}, { ...input, imagePaths: [imagePath, path.join(jobDir, '..', 'outside.png')] }), e => e.code === 'INVALID_IMAGE_PATH');
+  await assert.rejects(module.buildInvocation({}, { ...input, imagePaths: [] }), e => e.code === 'INVALID_IMAGES');
+  await assert.rejects(module.buildInvocation({}, { ...input, imagePaths: Array(21).fill(imagePath) }), e => e.code === 'INVALID_IMAGES');
+});
