@@ -15,12 +15,13 @@ import { extractKnowledge, selectSources } from '../src/knowledge.mjs';
 
 const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF9sAAAAASUVORK5CYII=', 'base64');
 
-test('scenario screenshot preferences isolate accounts and snapshot provider-specific model into queued work', async t => {
+test('administrator screenshot defaults are inherited and queued models retain snapshots', async t => {
   const calls=[];const s=await setup(t,{runner:async input=>{calls.push(input);return {answer:'ok'};}});
   const a=await s.login(),b=await s.login('other@example.com');
   const prefs={screenshot:{provider:'claude',models:{codex:'high-quality-codex',claude:'qwen-max'}}};
   const save=await s.api('/model-preferences',a,'PUT',{preferences:prefs});assert.equal(save.status,200);assert.deepEqual((await save.json()).preferences,prefs);
-  assert.equal((await (await s.api('/model-preferences',b)).json()).preferences.screenshot.models.claude,'');
+  assert.equal((await (await s.api('/model-preferences',b)).json()).preferences.screenshot.models.claude,'qwen-max');
+  assert.equal((await s.api('/model-preferences',b,'PUT',{preferences:prefs})).status,403);
   const bad=await s.api('/model-preferences',a,'PUT',{preferences:{screenshot:{models:{claude:'--inject config'}}}});assert.equal(bad.status,400);
   const form=new FormData();form.set('captureId',randomUUID());form.set('image',new Blob([pixel],{type:'image/png'}),'test.png');
   const upload=await s.api('/captures',a,'POST',form);assert.equal(upload.status,201);const {task}=await upload.json();assert.equal(task.provider,'claude');assert.equal(task.model,'qwen-max');
@@ -319,4 +320,69 @@ test('logout terminates its WebSocket and invalidates outstanding tickets', asyn
   const closed = new Promise(resolve => ws.once('close', resolve));
   await api('/auth/logout', a, 'POST', {}); await closed;
   assert.equal((await api('/auth/me', a)).status, 401);
+});
+
+test('only browser administrators can save shared AI profiles; secrets remain encrypted, masked and persistent', async t => {
+  const {createAiSettings}=await import('../src/ai-settings.mjs');
+  const {readFile,stat}=await import('node:fs/promises');
+  const s=await setup(t),admin=await s.login(),member=await s.login('other@example.com');
+  assert.equal((await s.api('/account/ai')).status,401);
+  assert.equal((await s.api('/account/ai',member)).status,403);
+  assert.equal((await s.api('/account/ai',member,'PUT',{profiles:{}})).status,403);
+  assert.equal((await s.api('/account/ai',{headers:{cookie:admin.headers.cookie}},'PUT',{profiles:{}})).status,403);
+  const secret='fixture-api-token-private';
+  const saved=await s.api('/account/ai',admin,'PUT',{profiles:{
+    'screenshot.claude':{authType:'bearer',model:'vision-model',apiKey:secret,baseUrl:'https://vision.example.test/anthropic'},
+    'transcript.claude':{authType:'bearer',model:'fast-model',apiKey:'fixture-text-token',baseUrl:'https://text.example.test/anthropic'},
+    'transcript.bailian':{model:'bailian-fast',apiKey:'fixture-bailian-token',workspaceId:'workspace-1',region:'cn-beijing'},
+    asr:{model:'asr-model',apiKey:'fixture-asr-token',workspaceId:'workspace-2',region:'cn-beijing'},
+    omni:{model:'audio-model',apiKey:'fixture-omni-token',workspaceId:'workspace-3',region:'cn-shanghai'}
+  },defaults:{screenshotProvider:'claude',textProvider:'bailian'}});
+  assert.equal(saved.status,200);
+  const body=await saved.json();assert.equal(body.profiles['screenshot.claude'].hasApiKey,true);assert.equal(body.profiles['screenshot.claude'].apiKey,undefined);assert(!JSON.stringify(body).includes(secret));
+  const stored=s.db.prepare('SELECT value FROM service_ai WHERE id=1').get().value;assert(!stored.includes(secret));assert(!Buffer.from(stored,'base64').toString().includes(secret));
+  assert.equal((await stat(path.join(s.dataDir,'.ai-settings.key'))).mode&0o777,0o600);
+  const runtime=createAiSettings({db:s.db,dataDir:s.dataDir});
+  assert.equal(runtime.cli('screenshot','claude').extraEnv.ANTHROPIC_AUTH_TOKEN,secret);
+  assert.equal(runtime.cli('transcript','claude').extraEnv.ANTHROPIC_AUTH_TOKEN,'fixture-text-token');
+  runtime.save({'screenshot.codex':{apiKey:'fixture-codex-key',baseUrl:'https://codex.example.test/v1',model:'codex-model'}});
+  assert.equal(runtime.cli('screenshot','codex').extraEnv.CODEX_API_KEY,'fixture-codex-key');
+  assert.equal(runtime.api('asr').apiKey,'fixture-asr-token');assert.equal(runtime.api('omni').apiKey,'fixture-omni-token');
+  assert.equal(runtime.api('transcript.bailian').textApiKey,'fixture-bailian-token');
+  const inherited=await (await s.api('/config',member)).json();assert.equal(inherited.screenshotPreferences.provider,'claude');assert.equal(inherited.screenshotPreferences.models.claude,'vision-model');
+  const defaults=await (await s.api('/interviews/preferences',member)).json();assert.equal(defaults.preferences.provider,'bailian');assert.equal(defaults.preferences.textModels.bailian,'bailian-fast');assert.equal(defaults.preferences.asrModel,'asr-model');assert.equal(defaults.preferences.audioModel,'audio-model');
+  const config=await (await s.api('/interviews/config',member)).json();assert.equal(config.configured,true);assert.equal(config.audioConfigured,true);
+  assert.equal((await s.api('/interviews/preferences',member,'PATCH',{provider:'codex'})).status,403);
+  await s.api('/account/ai',admin,'PUT',{profiles:{'screenshot.claude':{model:'updated-vision'}}});
+  assert.equal(runtime.cli('screenshot','claude').extraEnv.ANTHROPIC_AUTH_TOKEN,secret);
+  const invalid=await s.api('/account/ai',admin,'PUT',{profiles:{'screenshot.claude':{apiKey:'replacement',baseUrl:'http://invalid.test'}}});assert.equal(invalid.status,400);assert.equal(runtime.cli('screenshot','claude').extraEnv.ANTHROPIC_AUTH_TOKEN,secret);
+  runtime.save({'screenshot.claude':{authType:'api-key'}});assert.equal(runtime.cli('screenshot','claude').extraEnv.ANTHROPIC_API_KEY,secret);assert.equal(runtime.cli('screenshot','claude').extraEnv.ANTHROPIC_AUTH_TOKEN,'');
+  await s.api('/account/ai',admin,'PUT',{profiles:{'screenshot.claude':{apiKey:''}}});assert.equal(runtime.view()['screenshot.claude'].hasApiKey,false);
+  // No plaintext is persisted in the SQLite files either.
+  assert(!(await readFile(path.join(s.dataDir,'dual-link.sqlite-wal'))).includes(Buffer.from(secret)));
+});
+
+test('member screenshot and interview requests cannot override administrator providers or models',async t=>{
+  const calls=[];const s=await setup(t,{runner:async input=>{calls.push(input);return {answer:'OK'};}}),a=await s.login(),b=await s.login('other@example.com');
+  await s.api('/account/ai',a,'PUT',{profiles:{'screenshot.claude':{model:'admin-vision'},'transcript.claude':{model:'admin-text'},asr:{model:'admin-asr'},omni:{model:'admin-audio'}},defaults:{screenshotProvider:'claude',textProvider:'claude'}});
+  const form=new FormData();form.set('captureId',randomUUID());form.set('image',new Blob([pixel],{type:'image/png'}),'test.png');form.set('provider','codex');form.set('model','unapproved');
+  const upload=await s.api('/captures',b,'POST',form);assert.equal(upload.status,201);const {task}=await upload.json();assert.equal(task.provider,'claude');assert.equal(task.model,'admin-vision');
+  await s.worker.tick();await s.worker.idle();assert.equal(calls[0].provider,'claude');assert.equal(calls[0].model,'admin-vision');assert.equal(calls[0].userId,b.user.id);
+  const created=await s.api('/interviews',b,'POST',{provider:'codex',textModels:{codex:'unapproved'},asrModel:'unapproved',audioModel:'unapproved'});assert.equal(created.status,201);const {interview}=await created.json();assert.equal(interview.provider,'claude');assert.equal(interview.textModels.claude,'admin-text');assert.equal(interview.asrModel,'admin-asr');assert.equal(interview.audioModel,'admin-audio');
+  await s.api(`/interviews/${interview.id}/pause`,b,'POST',{});
+  const patched=await s.api(`/interviews/${interview.id}`,b,'PATCH',{provider:'codex',textModels:{codex:'unapproved'}});assert.equal(patched.status,200);assert.equal((await patched.json()).interview.provider,'claude');
+});
+
+test('configured administrator Claude credentials reach the real screenshot CLI without mutating process environment',async t=>{
+  const script='process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"result",subtype:"success",result:JSON.stringify({token:process.env.ANTHROPIC_AUTH_TOKEN,base:process.env.ANTHROPIC_BASE_URL,model:process.argv[process.argv.indexOf("--model")+1]})}));});';
+  const before=process.env.ANTHROPIC_AUTH_TOKEN;
+  const s=await setup(t,{cli:{mode:'native',claudeBin:process.execPath,claudePrefixArgs:['-e',script,'--']}}),a=await s.login(),b=await s.login('other@example.com');
+  const saved=await s.api('/account/ai',a,'PUT',{profiles:{'screenshot.claude':{authType:'bearer',apiKey:'fixture-vision-token',baseUrl:'https://fixture.example.test/anthropic',model:'fixture-vision-model'}},defaults:{screenshotProvider:'claude',textProvider:'codex'}});assert.equal(saved.status,200);
+  const form=new FormData();form.set('captureId',randomUUID());form.set('image',new Blob([pixel],{type:'image/png'}),'fixture.png');
+  const upload=await s.api('/captures',b,'POST',form);assert.equal(upload.status,201);const {task}=await upload.json();
+  await s.worker.tick();await s.worker.idle();
+  const row=s.db.prepare('SELECT * FROM tasks WHERE id=?').get(task.id);assert.equal(row.status,'completed');assert.deepEqual(JSON.parse(row.answer),{token:'fixture-vision-token',base:'https://fixture.example.test/anthropic',model:'fixture-vision-model'});
+  assert.equal(process.env.ANTHROPIC_AUTH_TOKEN,before);
+  const secret=randomBytes(32).toString('hex');const pairing=await(await s.api('/pairings',null,'POST',{name:'Admin PC',deviceSecret:secret})).json();await s.api('/pairings/approve',a,'POST',{code:pairing.code});
+  assert.equal((await s.api('/account/ai',{headers:{Authorization:'Bearer '+secret}})).status,403);
 });

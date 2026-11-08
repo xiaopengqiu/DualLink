@@ -16,7 +16,7 @@ test('scenario models select ASR per session and text model per provider while p
   const calls=[];const s=await setup(t,{textRunner:async input=>{calls.push(input);return {answer:'fast answer'};}});const a=await s.login(),b=await s.login('b@example.com'),device=await s.pair(a);
   const prefs={textModels:{codex:'codex-fast',claude:'qwen-flash',bailian:'qwen-flash'},asrModel:'qwen-audio-3.0-asr-flash-streaming',provider:'claude'};
   assert.equal((await s.api('/interviews/preferences',a,'PATCH',prefs)).status,200);
-  assert.equal((await (await s.api('/interviews/preferences',b)).json()).preferences.textModels.claude,'');
+  assert.equal((await (await s.api('/interviews/preferences',b)).json()).preferences.textModels.claude,'qwen-flash');
   const interview=await s.create(device);assert.deepEqual(interview.textModels,prefs.textModels);assert.equal(interview.asrModel,prefs.asrModel);
   const {socket}=await s.audio(interview,device);assert.equal(s.asrTasks[0].model,prefs.asrModel);
   assert.equal((await s.api(`/interviews/${interview.id}`,a,'PATCH',{textModels:{claude:'different-fast'}})).status,409);
@@ -177,7 +177,7 @@ test('zero retention keeps temporary working PCM until end and quota fails expli
 
 test('composite transcript pagination preserves every row sharing an equal timestamp',async t=>{
   const s=await setup(t);const a=await s.login(),interview=await s.create(a,{autoAnswer:false});
-  for(let i=0;i<2105;i++)s.interviews.recordSegment(interview.id,'remote',String(i),{text:'内容 '+i,startMs:100,endMs:200,final:true},false);
+  for(let i=0;i<2105;i++){s.interviews.recordSegment(interview.id,'remote',String(i),{text:'内容 '+i,startMs:100,endMs:200,final:true},false);if(i%100===0)await new Promise(setImmediate);}
   const latest=await(await s.api(`/interviews/${interview.id}`,a)).json();assert.equal(latest.segments.length,2000);assert.equal(latest.segmentsTruncated,true);assert.match(latest.nextCursor,/^100:\d+$/);
   const previous=await(await s.api(`/interviews/${interview.id}?cursor=${encodeURIComponent(latest.nextCursor)}`,a)).json();assert.equal(previous.segments.length,105);
   assert.equal(new Set([...latest.segments,...previous.segments].map(x=>x.id)).size,2105);
@@ -241,10 +241,10 @@ test('setting zero retention purges prior ended PCM at startup while keeping tra
 });
 
 
-test('dual-mode account preferences are isolated and manual is the default',async t=>{
+test('administrator dual-mode defaults are inherited and manual is the default',async t=>{
  const s=await setup(t);const a=await s.login(),b=await s.login('b@example.com');
  const changed=await s.api('/interviews/preferences',a,'PATCH',{mode:'audio',provider:'claude',transcribe:false,audioModel:'qwen3.8-omni-flash-realtime',audioWindowSeconds:45});assert.equal(changed.status,200);
- assert.equal((await(await s.api('/interviews/preferences',a)).json()).preferences.mode,'audio');assert.equal((await(await s.api('/interviews/preferences',b)).json()).preferences.mode,'transcript');
+ assert.equal((await(await s.api('/interviews/preferences',a)).json()).preferences.mode,'audio');assert.equal((await(await s.api('/interviews/preferences',b)).json()).preferences.mode,'audio');
  const session=await s.create(a);assert.equal(session.mode,'audio');assert.equal(session.autoAnswer,false);assert.equal(session.audioWindowSeconds,45);
 });
 

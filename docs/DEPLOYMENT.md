@@ -37,7 +37,9 @@ sudo bash deploy/install.sh assistant.example.com native
 
 ## 3. 配置模型认证
 
-编辑配置：
+管理员可在网站「账号设置 → 模型与接口配置」统一配置各模式的模型、API Key、接口及百炼业务空间和地域，所有普通账号自动继承。未在网页填写的项目继续使用服务器环境或服务账号 CLI 登录。网页密钥加密存入数据目录，备份时须连同 `DATA_DIR/.ai-settings.key` 一起保留。
+
+基础部署及可选的服务器默认配置：
 
 ```bash
 sudoedit /etc/dual-link.env

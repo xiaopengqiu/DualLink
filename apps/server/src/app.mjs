@@ -16,6 +16,7 @@ import { attachRealtime } from './realtime.mjs';
 import { createWorker } from './worker.mjs';
 import { diagnose } from './diagnostics.mjs';
 import { createInterviewService } from './interviews.mjs';
+import { createAiSettings } from './ai-settings.mjs';
 import { modelId, modelMap, defaultTextModel } from './model-settings.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -29,6 +30,7 @@ export async function createApp(options = {}) {
   const dataDir = path.resolve(projectRoot, options.dataDir || process.env.DATA_DIR || 'data');
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const db = openDatabase(dataDir);
+  const accountAi = createAiSettings({db,dataDir});
   const app = express(); const server = createServer(app);
   const secureCookies = options.secureCookies ?? (process.env.SECURE_COOKIES !== undefined ? process.env.SECURE_COOKIES === 'true' : (options.publicOrigin || process.env.PUBLIC_ORIGIN || '').startsWith('http:') ? false : process.env.NODE_ENV === 'production');
   const publicOrigin = options.publicOrigin || process.env.PUBLIC_ORIGIN || '';
@@ -66,7 +68,7 @@ export async function createApp(options = {}) {
   const protectedRouter = express.Router(); protectedRouter.use(requireAuth, csrf);
   const adminOnly = (req, res, next) => { if (req.identity?.kind !== 'web' || req.identity.role !== 'admin') return next(Object.assign(new Error('需要管理员权限'), { status: 403 })); next(); };
   const userRow = id => db.prepare('SELECT * FROM users WHERE id=?').get(id);
-  const screenshotPreferences = uid => ({ provider: defaultProvider, models: {codex:'',claude:''}, ...jsonParse(db.prepare('SELECT value FROM model_preferences WHERE user_id=?').get(uid)?.value,{}) });
+  const screenshotPreferences = uid => ({ provider: defaultProvider, models: {codex:'',claude:''}, ...jsonParse(db.prepare('SELECT value FROM model_preferences WHERE user_id=?').get(accountAi.owner() || uid)?.value,{}) });
   const owned = (table, id, userId) => { const r = db.prepare(`SELECT * FROM ${table} WHERE id=? AND user_id=?`).get(id, userId); if (!r) fail(404, '记录不存在'); return r; };
   const promptView = p => ({ id: p.id, name: p.name, content: p.content, isDefault: !!p.is_default, version: p.version, createdAt: p.created_at, updatedAt: p.updated_at });
   const knowledgeView = k => ({ id: k.id, name: k.name, size: k.size, status: k.status, error: k.error, characters: k.text.length, createdAt: k.created_at });
@@ -77,9 +79,9 @@ export async function createApp(options = {}) {
   const captureView = c => ({ id: c.id, captureId: c.capture_key, deviceId: c.device_id, deviceName: c.device_id ? db.prepare('SELECT name FROM devices WHERE id=?').get(c.device_id)?.name : undefined, createdAt: c.created_at, imageUrl: `/api/captures/${c.id}/image` });
   realtime = attachRealtime({ server, db, publicOrigin, devicesFor });
   let runner = options.runner;
-  if (!runner) { const { createCliRunner } = await import('./providers.mjs'); runner = createCliRunner(options.cli || {}); }
+  if (!runner) { const { createCliRunner } = await import('./providers.mjs'); runner = input => createCliRunner(accountAi.cli('screenshot',input.provider,options.cli || {}))(input); }
   const worker = createWorker({ db, dataDir, runner, publish: realtime.publish, taskView, concurrency: options.concurrency || Number(process.env.WORKER_CONCURRENCY) || 1, timeoutMs: options.timeoutMs || Number(process.env.AI_TIMEOUT_MS) || 180000, autoStart: options.startWorker !== false });
-  const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, audioRunner: options.audioRunner, omni: options.omni, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews });
+  const interviews = await createInterviewService({ server, db, dataDir, publicOrigin, publish: realtime.publish, textRunner: options.textRunner, audioRunner: options.audioRunner, omni: options.omni, cli: options.cli, asr: options.asr, asrFactory: options.asrFactory, options: options.interviews, accountAi });
   protectedRouter.use('/interviews', interviews.router);
 
   app.get('/api/health', (req, res) => res.json({ ok: true, version: '1.3.1' }));
@@ -122,14 +124,45 @@ export async function createApp(options = {}) {
     res.json({ ok: true });
   }));
   protectedRouter.get('/config', (req, res) => res.json({ providers: ['codex', 'claude'], defaultProvider, screenshotPreferences:screenshotPreferences(req.identity.userId), autoAnalyze: !!userRow(req.identity.userId).auto_analyze, iceServers: options.iceServers || (process.env.STUN_URL ? [{ urls: process.env.STUN_URL }] : []), maxUploadBytes: imageMax }));
+  const aiProfileView=()=>{
+    const profiles=accountAi.view(), screenshot=screenshotPreferences(accountAi.owner());
+    const interview=jsonParse(db.prepare('SELECT value FROM interview_preferences WHERE user_id=?').get(accountAi.owner())?.value,{});
+    for(const provider of ['codex','claude'])if(screenshot.models[provider]!==undefined)profiles['screenshot.'+provider].model=screenshot.models[provider];
+    for(const provider of ['codex','claude','bailian'])if(interview.textModels?.[provider]!==undefined)profiles['transcript.'+provider].model=interview.textModels[provider];
+    if(interview.asrModel!==undefined)profiles.asr.model=interview.asrModel;
+    if(interview.audioModel!==undefined)profiles.omni.model=interview.audioModel;
+    return profiles;
+  };
+  protectedRouter.get('/account/ai', adminOnly, (req,res)=>res.json({profiles:aiProfileView(),defaults:{screenshotProvider:screenshotPreferences(req.identity.userId).provider,textProvider:jsonParse(db.prepare('SELECT value FROM interview_preferences WHERE user_id=?').get(accountAi.owner())?.value,{}).provider || process.env.INTERVIEW_DEFAULT_PROVIDER || 'codex'}}));
+  protectedRouter.put('/account/ai', adminOnly, (req,res)=>{
+    if(req.body.defaults && (!['codex','claude'].includes(req.body.defaults.screenshotProvider)||!['codex','claude','bailian'].includes(req.body.defaults.textProvider)))fail(400,'默认执行方式无效');
+    const profiles=db.transaction(()=>{
+      const result=accountAi.save(req.body.profiles);
+      const owner=accountAi.owner() || req.identity.userId;
+      const screenshot=screenshotPreferences(owner);
+      const interview=jsonParse(db.prepare('SELECT value FROM interview_preferences WHERE user_id=?').get(owner)?.value,{});
+      if(req.body.defaults){screenshot.provider=req.body.defaults.screenshotProvider;interview.provider=req.body.defaults.textProvider;}
+      for(const [name,value] of Object.entries(req.body.profiles)){
+        if(value.model===undefined)continue;
+        if(name.startsWith('screenshot.'))screenshot.models[name.split('.')[1]]=value.model.trim();
+        else if(name.startsWith('transcript.'))interview.textModels={...interview.textModels,[name.split('.')[1]]:value.model.trim()};
+        else interview[name==='asr'?'asrModel':'audioModel']=value.model.trim();
+      }
+      db.prepare('INSERT INTO model_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(owner,JSON.stringify(screenshot));
+      db.prepare('INSERT INTO interview_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(owner,JSON.stringify(interview));
+      return result;
+    })();
+    res.json({profiles:aiProfileView()});
+  });
   protectedRouter.get('/model-preferences',(req,res)=>res.json({preferences:{screenshot:screenshotPreferences(req.identity.userId)}}));
-  protectedRouter.put('/model-preferences',browserOnly,(req,res)=>{
+  protectedRouter.put('/model-preferences',adminOnly,(req,res)=>{
     const body=req.body.preferences ?? req.body;
     if(!body || typeof body!=='object' || Array.isArray(body) || !body.screenshot || typeof body.screenshot!=='object' || Array.isArray(body.screenshot))fail(400,'截图模型配置无效');
     const current=screenshotPreferences(req.identity.userId), input=body.screenshot;
     const provider=input.provider===undefined?current.provider:input.provider;if(!['codex','claude'].includes(provider))fail(400,'截图执行方式无效');
     const value={provider,models:input.models===undefined?current.models:modelMap(input.models,current.models,['codex','claude'])};
-    db.prepare('INSERT INTO model_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(req.identity.userId,JSON.stringify(value));
+    accountAi.save(Object.fromEntries(Object.entries(value.models).map(([provider,model])=>['screenshot.'+provider,{model}])));
+    db.prepare('INSERT INTO model_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(accountAi.owner() || req.identity.userId,JSON.stringify(value));
     res.json({preferences:{screenshot:value}});
   });
   protectedRouter.put('/settings', browserOnly, (req, res) => {
@@ -244,8 +277,10 @@ export async function createApp(options = {}) {
       if (db.prepare('SELECT count(*) AS n FROM quota_events WHERE user_id=? AND created_at>=?').get(uid, today).n >= u.daily_limit) fail(429, '已达到今日任务额度');
       if (db.prepare("SELECT count(*) AS n FROM tasks WHERE user_id=? AND status IN ('queued','running')").get(uid).n >= 5) fail(429, '待处理任务过多，请稍后再试');
       const preferences=screenshotPreferences(uid);
-      const provider = input.provider || preferences.provider; if (!['codex', 'claude'].includes(provider)) fail(400, '模型服务不受支持');
-      const model = input.model===undefined ? preferences.models[provider] || defaultTextModel(provider,options.cli) : modelId(input.model) || defaultTextModel(provider,options.cli);
+      const mayConfigure=userRow(uid).role==='admin';
+      const provider = mayConfigure ? input.provider || preferences.provider : preferences.provider; if (!['codex', 'claude'].includes(provider)) fail(400, '模型服务不受支持');
+      const configuredModel=preferences.models[provider] || accountAi.profile('screenshot.'+provider).model || defaultTextModel(provider,options.cli);
+      const model = mayConfigure && input.model!==undefined ? modelId(input.model) || configuredModel : configuredModel;
       let prompt = input.promptId ? owned('prompts', input.promptId, uid) : db.prepare('SELECT * FROM prompts WHERE user_id=? ORDER BY is_default DESC,created_at LIMIT 1').get(uid);
       if (!prompt) prompt = { name: '默认风格', content: '请用中文准确回答截图中的问题。' };
       const question = input.question === undefined ? '' : text(input.question, '补充问题', 8000, false);

@@ -13,7 +13,7 @@ const parse = (value, fallback = []) => { try { return JSON.parse(value); } catc
 const route = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
 const boundedNumber = (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value) || fallback));
 
-export async function createInterviewService({ server, db, dataDir, publicOrigin, publish, textRunner, audioRunner, omni = {}, cli = {}, asr = {}, asrFactory, options = {} }) {
+export async function createInterviewService({ server, db, dataDir, publicOrigin, publish, textRunner, audioRunner, omni = {}, cli = {}, asr = {}, asrFactory, options = {}, accountAi }) {
   const asrConfig = asrConfiguration(asr);
   const configured = typeof asrFactory === 'function' || asrConfig.configured;
   const maxSessionMinutes = boundedNumber(options.maxSessionMinutes ?? process.env.ASR_MAX_SESSION_MINUTES, 120, 1, 240);
@@ -28,21 +28,33 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   let lazyRunner;
   if (!textRunner) {
     const { createTextRunner } = await import('./text-providers.mjs');
-    lazyRunner = createTextRunner({ ...cli, timeoutMs, runtimeRoot: path.join(dataDir, 'jobs', 'warm') }); textRunner = lazyRunner;
+    lazyRunner = createTextRunner({ ...cli, timeoutMs, runtimeRoot: path.join(dataDir, 'jobs', 'warm') });
+    textRunner = async input=>{
+      const p=accountAi?.profile('transcript.'+input.provider)||{};
+      if(!p.apiKey&&!p.baseUrl&&!p.workspaceId&&!p.region)return lazyRunner(input);
+      let settings=accountAi.cli('transcript',input.provider,{...cli,timeoutMs,codexTransport:'exec'});
+      if(input.provider==='bailian')settings=accountAi.api('transcript.bailian',settings);
+      const run=createTextRunner(settings);
+      try{return await run(input);}finally{await run.close();}
+    };
+    textRunner.close=()=>lazyRunner.close();
+    textRunner.closeSession=id=>lazyRunner.closeSession(id);
+    textRunner.prepareSession=input=>Object.values(accountAi?.profile('transcript.'+input.provider)||{}).some(Boolean)?Promise.resolve({prepared:false}):lazyRunner.prepareSession(input);
   }
   const omniConfig=nativeAudioConfiguration(omni),omniModel=omniConfig.model,audioModels=omniConfig.models;
   const audioConfigured=!!audioRunner||omniConfig.configured;
   const asrModels=[...new Set([asrConfig.model,...(process.env.ASR_MODELS||'').split(',').map(x=>x.trim()).filter(Boolean)])];
   const customAsrModelsAllowed=!process.env.ASR_MODELS,customAudioModelsAllowed=omniConfig.customModelsAllowed;
   const serverDefaults={mode:process.env.INTERVIEW_DEFAULT_MODE||'transcript',provider:defaultProvider,textModels:{codex:'',claude:'',bailian:''},asrModel:asrConfig.model,transcribe:true,audioModel:omniModel,audioWindowSeconds:boundedNumber(process.env.INTERVIEW_AUDIO_WINDOW_SECONDS,120,15,180)};
-  const defaults=id=>({...serverDefaults,...parse(db.prepare('SELECT value FROM interview_preferences WHERE user_id=?').get(id)?.value,{})});
-  const validateSettings=(body,current)=>{
+  const defaults=id=>{const value={...serverDefaults,...parse(db.prepare('SELECT value FROM interview_preferences WHERE user_id=?').get(accountAi?.owner() || id)?.value,{})};return {...value,asrModel:value.asrModel||asrConfig.model,audioModel:value.audioModel||omniModel};};
+  const validateSettings=(body,current,canConfigure=true)=>{
+    if(!canConfigure)body=Object.fromEntries(Object.entries(body).filter(([key])=>!['provider','textModels','asrModel','audioModel'].includes(key)));
     const result={...current};
     if(body.mode!==undefined){if(!['transcript','audio'].includes(body.mode))fail(400,'回答模式无效');result.mode=body.mode;}
     if(body.provider!==undefined){if(!validProviders.includes(body.provider))fail(400,'文字回答模型无效');result.provider=body.provider;}
     if(body.transcribe!==undefined){if(typeof body.transcribe!=='boolean')fail(400,'后台转写设置无效');result.transcribe=body.transcribe;}
-    if(body.audioModel!==undefined){modelId(body.audioModel);const selected=body.audioModel||omniModel;if(!customAudioModelsAllowed&&!audioModels.includes(selected))fail(400,'音频模型未在服务端配置');result.audioModel=selected;}
-    if(body.asrModel!==undefined){modelId(body.asrModel);const selected=body.asrModel||asrConfig.model;if(!customAsrModelsAllowed&&!asrModels.includes(selected))fail(400,'转写模型未在服务端配置');result.asrModel=selected;}
+    if(body.audioModel!==undefined){modelId(body.audioModel);const selected=body.audioModel||omniModel;if(!customAudioModelsAllowed&&!audioModels.includes(selected)&&selected!==accountAi?.profile('omni').model)fail(400,'音频模型未在服务端配置');result.audioModel=selected;}
+    if(body.asrModel!==undefined){modelId(body.asrModel);const selected=body.asrModel||asrConfig.model;if(!customAsrModelsAllowed&&!asrModels.includes(selected)&&selected!==accountAi?.profile('asr').model)fail(400,'转写模型未在服务端配置');result.asrModel=selected;}
     if(body.textModels!==undefined)result.textModels=modelMap(body.textModels,current.textModels);
     if(body.audioWindowSeconds!==undefined){if(!Number.isInteger(body.audioWindowSeconds)||body.audioWindowSeconds<15||body.audioWindowSeconds>180)fail(400,'音频窗口需为15至180秒');result.audioWindowSeconds=body.audioWindowSeconds;}
     return result;
@@ -144,7 +156,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
       db.prepare("UPDATE interview_answers SET context_snapshot_id=? WHERE id=? AND status='running'").run(snapshotId, answer.id);
       db.prepare("UPDATE interview_questions SET status='answering',updated_at=? WHERE id=? AND revision=?").run(now(), question.id, question.revision); notifyQuestion(question.id); notifyAnswer(answer.id);
       let accumulated = '', lastSave = 0;
-      let run=textRunner;if(answer.mode==='audio'){if(!audioRunner){const m=await import('./native-audio-providers.mjs');audioRunner=m.createNativeAudioRunner({...omni,timeoutMs});}run=audioRunner;}
+      let run=textRunner;if(answer.mode==='audio'){if(audioRunner)run=audioRunner;else run=async input=>{const m=await import('./native-audio-providers.mjs');const current=m.createNativeAudioRunner(accountAi?.api('omni',{...omni,timeoutMs})||{...omni,timeoutMs});try{return await current(input);}finally{await current.close();}};}
       const result = await run({audioTurns,model:answer.model||answer.audio_model||undefined, provider: answer.provider, prompt: context.prompt, jobDir, sessionId: interview.id, userId: interview.user_id, signal: controller.signal, onDelta(delta) {
         if (controller.signal.aborted || typeof delta !== 'string') return;
         accumulated += delta;
@@ -248,20 +260,24 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     }
   }
   const maxDailyMinutes=boundedNumber(options.maxDailyMinutes??process.env.ASR_DAILY_MINUTES,480,1,2880);
-  const startAsr=asrFactory||createDashScopeAsrFactory(asr);
-  const audio = attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory:input=>startAsr({...input,model:getSession(input.sessionId)?.asr_model||asrConfig.model}), recordSegment,onStored:notifyInterview,asrRequested:id=>!!getSession(id)?.transcribe,asrEnabled:id=>{const i=getSession(id);return i&&(i.mode==='transcript'||(i.transcribe&&configured));},asrRequired:id=>getSession(id)?.mode==='transcript', status: audioStatus, gap, maxSessionMinutes, retentionDays, maxDailyMinutes, maxUserBytes: boundedNumber(options.maxUserAudioBytes ?? process.env.AUDIO_MAX_USER_BYTES, 512*1024*1024, 1024*1024, 2*1024*1024*1024) });
+  const effectiveAsr=()=>asrConfiguration(accountAi?.api('asr',asr)||asr);
+  const effectiveOmni=()=>nativeAudioConfiguration(accountAi?.api('omni',omni)||omni);
+  const hasAsr=()=>!!asrFactory||effectiveAsr().configured;
+  const hasAudio=()=>!!audioRunner||effectiveOmni().configured;
+  const startAsr=asrFactory||(input=>createDashScopeAsrFactory(accountAi?.api('asr',asr)||asr)(input));
+  const audio = attachInterviewAudio({ server, db, dataDir, publicOrigin, asrFactory:input=>startAsr({...input,model:getSession(input.sessionId)?.asr_model||asrConfig.model}), recordSegment,onStored:notifyInterview,asrRequested:id=>!!getSession(id)?.transcribe,asrEnabled:id=>{const i=getSession(id);return i&&(i.mode==='transcript'||(i.transcribe&&hasAsr()));},asrRequired:id=>getSession(id)?.mode==='transcript', status: audioStatus, gap, maxSessionMinutes, retentionDays, maxDailyMinutes, maxUserBytes: boundedNumber(options.maxUserAudioBytes ?? process.env.AUDIO_MAX_USER_BYTES, 512*1024*1024, 1024*1024, 2*1024*1024*1024) });
   db.prepare("UPDATE interview_answers SET status=CASE WHEN attempts<3 THEN 'queued' ELSE 'failed' END,lease_until=NULL,updated_at=? WHERE status='running'").run(now());
 
   // Surviving recordings cannot truthfully remain "recording" after a restart.
   for (const old of db.prepare("SELECT * FROM interviews WHERE status='recording'").all()) { db.prepare("UPDATE interviews SET status='paused',recording_status='interrupted',error='服务器已重启，请恢复录音并补传本地缓存',updated_at=? WHERE id=?").run(now(), old.id); gap(old.id, null, null, null, '服务器重启造成录音中断'); }
   const prepare = interview => { if (interview.mode==='transcript' && textRunner.prepareSession && interview.status === 'recording') void Promise.resolve(textRunner.prepareSession({ userId: interview.user_id, sessionId: interview.id,provider:interview.provider,model:parse(interview.text_models,{})[interview.provider]||defaultTextModel(interview.provider,cli)||undefined })).catch(() => { /* A model failure never masquerades as an ASR recording failure. */ }); };
-  router.get('/config', (req, res) => res.json({ configured, model: asrConfig.model,asrModel:asrConfig.model,asrModels,customAsrModelsAllowed,customAudioModelsAllowed, region: asrConfig.region, sampleRate: 16000, maxSessionMinutes,maxDailyMinutes, rawAudioRetentionDays: retentionDays,audioConfigured,audioModels,defaults:defaults(req.identity.userId), autoAnswerAvailable: true, providers: ['codex','claude', ...(process.env.INTERVIEW_TEXT_API_KEY || process.env.DASHSCOPE_API_KEY || asrConfig.apiKey || !lazyRunner ? ['bailian'] : [])], defaultProvider }));
+  router.get('/config', (req, res) => res.json({ configured:hasAsr(), model: asrConfig.model,asrModel:asrConfig.model,asrModels,customAsrModelsAllowed,customAudioModelsAllowed, region: asrConfig.region, sampleRate: 16000, maxSessionMinutes,maxDailyMinutes, rawAudioRetentionDays: retentionDays,audioConfigured:hasAudio(),audioModels,defaults:defaults(req.identity.userId), autoAnswerAvailable: true, providers: ['codex','claude', ...(accountAi?.profile('transcript.bailian').apiKey || process.env.INTERVIEW_TEXT_API_KEY || process.env.DASHSCOPE_API_KEY || asrConfig.apiKey || !lazyRunner ? ['bailian'] : [])], defaultProvider }));
   router.get('/preferences',(req,res)=>res.json({preferences:defaults(req.identity.userId)}));
-  router.patch('/preferences',(req,res)=>{if(req.identity.kind!=='web')fail(403,'请在网站配置账号默认设置');const value=validateSettings(req.body,defaults(req.identity.userId));db.prepare('INSERT INTO interview_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(req.identity.userId,JSON.stringify(value));res.json({preferences:value});});
+  router.patch('/preferences',(req,res)=>{if(req.identity.kind!=='web'||req.identity.role!=='admin')fail(403,'仅管理员可配置模型默认设置');const value=validateSettings(req.body,defaults(req.identity.userId));accountAi?.save({...Object.fromEntries(Object.entries(value.textModels).map(([provider,model])=>['transcript.'+provider,{model}])),asr:{model:value.asrModel},omni:{model:value.audioModel}});db.prepare('INSERT INTO interview_preferences(user_id,value) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET value=excluded.value').run(accountAi?.owner() || req.identity.userId,JSON.stringify(value));res.json({preferences:value});});
   router.get('/', (req, res) => { const limit = Math.max(1,Math.min(200,parseInt(req.query.limit,10)||50)); res.json({ interviews: db.prepare('SELECT * FROM interviews WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(req.identity.userId, limit).map(interviewView) }); });
   router.post('/', (req, res) => {
     const owner = req.identity.userId, body = req.body;
-    const settings=validateSettings(body,defaults(owner));const provider=settings.provider; if (!validProviders.includes(provider)) fail(400, '不支持的面试回答模型');
+    const settings=validateSettings(body,defaults(owner),req.identity.role==='admin');const provider=settings.provider; if (!validProviders.includes(provider)) fail(400, '不支持的面试回答模型');
     if (body.autoAnswer !== undefined && typeof body.autoAnswer !== 'boolean') fail(400, '自动回答设置无效');
     const hotwords = body.hotwords || []; if (!Array.isArray(hotwords) || hotwords.length > 200 || hotwords.some(word => typeof word !== 'string' || !word.trim() || word.length > 80)) fail(400, '热词最多 200 个，每个不超过 80 个字符');
     let row;
@@ -298,13 +314,13 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     if (body.autoAnswer !== undefined && typeof body.autoAnswer !== 'boolean') fail(400, '自动回答设置无效');
     if (body.provider !== undefined && !validProviders.includes(body.provider)) fail(400, '不支持的面试回答模型');
     const previous={mode:row.mode,provider:row.provider,textModels:modelMap(parse(row.text_models,{})),asrModel:row.asr_model||asrConfig.model,transcribe:!!row.transcribe,audioModel:row.audio_model,audioWindowSeconds:row.audio_window_seconds};
-    const settings=validateSettings(body,previous);
+    const settings=validateSettings(body,previous,req.identity.role==='admin');
     const changes=['mode','provider','transcribe','audioModel','audioWindowSeconds','textModels','asrModel'].some(key=>body[key]!==undefined&&JSON.stringify(settings[key])!==JSON.stringify(previous[key]));
     if(changes&&row.status==='recording')fail(409,'请先暂停录音再切换回答模式或音频配置');
     if(changes||body.provider!==undefined)db.prepare('UPDATE interviews SET config_version=config_version+1 WHERE id=?').run(row.id);
     if(changes){for(const a of db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").all(row.id))cancelAnswer(a.id);stopAuto(row.id);}
-    if (body.provider && body.provider !== row.provider) { for (const answer of db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").all(row.id)) cancelAnswer(answer.id); void textRunner.closeSession?.(row.id); }
-    db.prepare('UPDATE interviews SET title=?,auto_answer=?,provider=?,updated_at=? WHERE id=?').run(body.title === undefined ? row.title : text(body.title,'面试名称',120), body.autoAnswer === undefined ? row.auto_answer : body.autoAnswer ? 1 : 0, body.provider || row.provider, now(), row.id);
+    if (settings.provider !== row.provider) { for (const answer of db.prepare("SELECT id FROM interview_answers WHERE session_id=? AND status IN ('queued','running')").all(row.id)) cancelAnswer(answer.id); void textRunner.closeSession?.(row.id); }
+    db.prepare('UPDATE interviews SET title=?,auto_answer=?,provider=?,updated_at=? WHERE id=?').run(body.title === undefined ? row.title : text(body.title,'面试名称',120), body.autoAnswer === undefined ? row.auto_answer : body.autoAnswer ? 1 : 0, settings.provider, now(), row.id);
     db.prepare('UPDATE interviews SET mode=?,transcribe=?,audio_model=?,audio_window_seconds=?,auto_answer=? WHERE id=?').run(settings.mode,settings.mode==='transcript'?1:settings.transcribe?1:0,settings.audioModel,settings.audioWindowSeconds,settings.mode==='audio'?0:body.autoAnswer===undefined?row.auto_answer:body.autoAnswer?1:0,row.id);
     db.prepare('UPDATE interviews SET text_models=?,asr_model=? WHERE id=?').run(JSON.stringify(settings.textModels),settings.asrModel,row.id);
     if (body.autoAnswer === false) stopAuto(row.id); notifyInterview(row.id); res.json({ interview: interviewView(getSession(row.id)) });
@@ -328,8 +344,8 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
   router.post('/:id/audio-ticket', (req,res) => {
     const row = own(req.params.id,req.identity.userId);
     if (req.identity.kind !== 'device') fail(403, '请从已配对的 Windows 客户端开始录音');
-    if (row.mode==='transcript'&&!configured) fail(503, '尚未配置实时语音识别，请管理员设置百炼 API Key、业务空间和地域', 'ASR_NOT_CONFIGURED');
-    if(row.mode==='audio'&&!audioConfigured)fail(503,'尚未配置音频直答模型，请管理员配置 OMNI 或百炼密钥','AUDIO_NOT_CONFIGURED');
+    if (row.mode==='transcript'&&!hasAsr()) fail(503, '尚未配置实时语音识别，请管理员设置百炼 API Key、业务空间和地域', 'ASR_NOT_CONFIGURED');
+    if(row.mode==='audio'&&!hasAudio())fail(503,'尚未配置音频直答模型，请管理员配置 OMNI 或百炼密钥','AUDIO_NOT_CONFIGURED');
     const mode = req.body.mode || 'live'; if (!['live','replay'].includes(mode)) fail(400, '音频传输模式无效');
     if (mode === 'live' && row.status !== 'recording') fail(409, '请先恢复面试录音');
     if (row.device_id && row.device_id !== req.identity.deviceId) fail(403, '本场面试已由另一台电脑录音');
@@ -363,7 +379,7 @@ export async function createInterviewService({ server, db, dataDir, publicOrigin
     let last=db.prepare("SELECT * FROM interview_questions WHERE session_id=? AND origin=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(sessionId,'trigger_'+interview.mode);
     let rangeStart,rangeEnd,captureEndMs,selectedSegments=[],truncated=false,questionText;
     if(interview.mode==='audio'){
-      if(!audioConfigured)fail(503,'音频直答模型尚未配置','AUDIO_NOT_CONFIGURED');
+      if(!hasAudio())fail(503,'音频直答模型尚未配置','AUDIO_NOT_CONFIGURED');
       const latest=db.prepare("SELECT max(start_ms+sample_count/16) AS end FROM interview_audio_frames WHERE session_id=? AND track='remote' AND replay=0 AND active=1 AND byte_offset IS NOT NULL").get(sessionId).end;
       if(latest===null)fail(409,'尚未收到有效的远端声音，请等面试官提问后再触发');
       if(last&&latest<=last.audio_end_ms)return remember(last,queueAnswer(interview,last));
