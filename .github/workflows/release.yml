@@ -1,0 +1,86 @@
+name: Build and publish Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build (for example v1.5.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Verify the version tag
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$version") { throw "Tag and package version differ" }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "A stable release version is required" }
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Package Windows installer and portable client
+        run: npm run package:win
+      - name: Package source, web and checksums
+        run: npm run release:assets
+      - name: Upload, verify and publish all five release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $files = @(
+            "release/windows/DualLink-$version-x64-setup.exe",
+            "release/windows/DualLink-$version-x64-portable.exe",
+            "release/DualLink-source-$version.zip",
+            "release/DualLink-web-$version.zip",
+            "release/SHA256SUMS-$version.txt"
+          )
+          $existing = gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($existing | ConvertFrom-Json).isDraft) { throw "Release is already published; refusing to replace it" }
+            gh release upload $env:RELEASE_TAG @files --clobber
+          } else {
+            gh release create $env:RELEASE_TAG @files --draft --verify-tag --title "DualLink $env:RELEASE_TAG" --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Release upload failed" }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Cannot verify uploaded release" }
+          foreach ($file in $files) {
+            $local = Get-Item $file
+            $asset = @($release.assets | Where-Object name -eq $local.Name)
+            if ($asset.Count -ne 1 -or $asset[0].size -ne $local.Length) { throw "Uploaded asset mismatch: $file" }
+          }
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }
+      - name: Remove local build products after successful publication
+        if: success()
+        shell: pwsh
+        run: |
+          Remove-Item release, .local -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item node_modules/electron -Recurse -Force -ErrorAction SilentlyContinue

@@ -9,7 +9,7 @@ const release = path.join(root, 'release');
 await mkdir(release, { recursive: true });
 const outputPath = path.join(release, `DualLink-source-${version}.zip`);
 const files = {};
-const excluded = new Set(['node_modules', '.git', '.codex', '.claude', 'release', 'data', '.local', 'dist', 'build', 'out', 'coverage', '.cache', '.vite', 'credentials', 'test-results', 'playwright-report']);
+const excluded = new Set(['node_modules', '.git', '.worktrees', 'AGENTS.md', '.codex', '.claude', 'release', 'data', '.local', 'dist', 'build', 'out', 'coverage', '.cache', '.vite', 'credentials', 'test-results', 'playwright-report']);
 const sensitiveFiles = new Set(['auth.json', '.credentials.json', 'credentials.json']);
 async function add(directory, relative = '') {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
