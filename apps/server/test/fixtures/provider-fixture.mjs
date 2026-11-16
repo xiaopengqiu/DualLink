@@ -32,5 +32,14 @@ process.stdin.on('end', async () => {
     for (const text of ['你好', '世界']) emit({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } });
     emit({ type: 'assistant', message: { content: [{ type: 'text', text: '你好世界' }] } });
     emit({ type: 'result', subtype: 'success', result: '你好世界', usage: { output_tokens: 4 } });
+  } else if (mode === 'structured-auth') {
+    emit({ type: 'turn.failed', error: { code: 'invalid_api_key', message: 'request failed' } });
+    process.exitCode = 1;
+  } else if (mode === 'structured-model') {
+    emit({ type: 'result', subtype: 'error', result: 'model qwen-vision not found' });
+    process.exitCode = 1;
+  } else if (mode === 'structured-network') {
+    emit({ type: 'error', code: 'ECONNRESET', message: 'request failed' });
+    process.exitCode = 1;
   }
 });

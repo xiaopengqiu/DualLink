@@ -32,6 +32,22 @@ function redact(value, env) {
   return result.replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|Bearer\s+[^\s]+)/g, '[redacted]').slice(0, 1200);
 }
 
+/** Classify provider failures without exposing raw provider diagnostics. */
+export function classifyProviderFailure(value, provider = '') {
+  const message = String(value || '').trim();
+  const normalized = message.toLowerCase();
+  if (/authenticat|unauthori[sz]|invalid[_ -]?(?:api[_ -]?key|token)|api key|login required|not logged|credential|permission denied|forbidden/.test(normalized)) {
+    return 'AI_AUTH_FAILED';
+  }
+  if (/model\b.*\b(not found|does not exist|is unavailable|is invalid)|unknown model|invalid model|model_not_found|no such model|unsupported model/.test(normalized)) {
+    return 'AI_MODEL_FAILED';
+  }
+  if (/network|connect(?:ion)? (?:refused|reset|failed)|econn(?:refused|reset)|enotfound|etimedout|dns|socket|tls|ssl|timed out|fetch failed|502|503|504/.test(normalized)) {
+    return 'AI_NETWORK_FAILED';
+  }
+  return 'AI_PROCESS_FAILED';
+}
+
 async function validateInput(input) {
   if (!['codex', 'claude'].includes(input.provider)) throw new ProviderError('INVALID_PROVIDER', '不支持的模型提供方 provider');
   if (typeof input.prompt !== 'string' || input.prompt.length > 160000) throw new ProviderError('INVALID_PROMPT', '提示词为空或超过限制');
@@ -155,7 +171,11 @@ export function createCliRunner(options = {}) {
         if (input.provider === 'codex') {
           if (value.type === 'item.completed' && value.item?.type === 'agent_message' && value.item.phase !== 'commentary' && typeof value.item.text === 'string') answer = value.item.text;
           if (value.type === 'turn.completed') usage = value.usage;
-          if (value.type === 'turn.failed' || value.type === 'error') fail('AI_PROCESS_FAILED', redact(value.error?.message || value.message || 'Codex 执行失败', invocation.env));
+          if (value.type === 'turn.failed' || value.type === 'error') {
+            const message = value.error?.message || value.message || 'Codex 执行失败';
+            const classification = classifyProviderFailure([value.error?.code, value.code, message].filter(Boolean).join(' '), input.provider);
+            fail(classification, redact(message, invocation.env));
+          }
         } else {
           if (value.type === 'stream_event' && value.event?.type === 'content_block_delta' && value.event.delta?.type === 'text_delta') emitDelta(value.event.delta.text);
           if (value.type === 'assistant') {
@@ -164,7 +184,11 @@ export function createCliRunner(options = {}) {
           }
           if (value.type === 'result') {
             usage = value.usage;
-            if (value.is_error || (value.subtype && value.subtype !== 'success')) fail('AI_PROCESS_FAILED', redact(value.result || value.errors?.join('; ') || 'Claude 执行失败', invocation.env));
+            if (value.is_error || (value.subtype && value.subtype !== 'success')) {
+              const message = value.result || value.errors?.join('; ') || 'Claude 执行失败';
+              const classification = classifyProviderFailure([value.subtype, value.error?.code, message].filter(Boolean).join(' '), input.provider);
+              fail(classification, redact(message, invocation.env));
+            }
             else if (typeof value.result === 'string') answer = value.result;
           }
         }
@@ -190,7 +214,10 @@ export function createCliRunner(options = {}) {
         line += decoder.end();
         if (line) parseLine(line);
         if (failure) { finish(failure); return; }
-        if (code !== 0) { finish(new ProviderError('AI_PROCESS_FAILED', `${input.provider} 执行失败 (${code})：${redact(stderr || '请检查认证、模型名称和网络连接', invocation.env)}`)); return; }
+        if (code !== 0) {
+          const detail = stderr || '请检查认证、模型名称和网络连接';
+          finish(new ProviderError(classifyProviderFailure(detail, input.provider), `${input.provider} 执行失败 (${code})：${redact(detail, invocation.env)}`)); return;
+        }
         const text = answer || partial;
         if (!text.trim()) { finish(new ProviderError('AI_EMPTY_OUTPUT', '模型没有返回回答，请检查 CLI 版本和认证状态')); return; }
         if (input.provider === 'codex' && !partial) { try { input.onDelta?.(text); } catch { finish(new ProviderError('AI_CALLBACK_FAILED', '无法保存回答进度')); return; } }

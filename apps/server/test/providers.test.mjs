@@ -29,6 +29,28 @@ test('Codex uses stdin and a separate image argument, returns only the final ass
   assert.deepEqual(result.usage, { input_tokens: 13, output_tokens: 7 });
 });
 
+test('provider failures are classified into actionable auth, model, and network codes', () => {
+  assert.equal(module.classifyProviderFailure('Authentication failed: invalid API key'), 'AI_AUTH_FAILED');
+  assert.equal(module.classifyProviderFailure('model qwen-vision not found'), 'AI_MODEL_FAILED');
+  assert.equal(module.classifyProviderFailure('connect ECONNRESET api.example.test'), 'AI_NETWORK_FAILED');
+  assert.equal(module.classifyProviderFailure('unexpected provider crash'), 'AI_PROCESS_FAILED');
+});
+
+test('structured Codex and Claude failures preserve typed codes', async t => {
+  for (const [mode, code, provider] of [['structured-auth', 'AI_AUTH_FAILED', 'codex'], ['structured-model', 'AI_MODEL_FAILED', 'claude'], ['structured-network', 'AI_NETWORK_FAILED', 'codex']]) {
+    const { run, ...input } = await setup(t, mode);
+    await assert.rejects(run({ ...input, provider, prompt: 'test' }), error => error.code === code);
+  }
+});
+
+test('Codex model and service-account isolation flags propagate to invocation', async t => {
+  const { jobDir, imagePath } = await setup(t, 'codex');
+  const invocation = await module.buildInvocation({ codexModel: 'vision-model', codexLoadUserConfig: false }, { jobDir, imagePath, provider: 'codex', prompt: 'test' });
+  assert.ok(invocation.args.includes('--model') && invocation.args.includes('vision-model'));
+  assert.ok(invocation.args.includes('--ignore-user-config') && invocation.args.includes('--ignore-rules'));
+  assert.equal(invocation.env.CODEX_HOME, process.env.CODEX_HOME);
+});
+
 test('Claude receives a real Base64 image block and emits text deltas without duplicating the final answer', async t => {
   const { run, ...input } = await setup(t, 'claude');
   const deltas = [];
@@ -69,7 +91,7 @@ test('provider output is bounded and errors redact credentials', async t => {
   const failure = await setup(t, 'failure', { extraEnv: { ANTHROPIC_API_KEY: 'secret-test-key' } });
   await assert.rejects(failure.run({ imagePath: failure.imagePath, jobDir: failure.jobDir, provider: 'claude', prompt: 'test' }), e => {
     assert.doesNotMatch(e.message, /secret-test-key/);
-    return e.code === 'AI_PROCESS_FAILED';
+    return e.code === 'AI_AUTH_FAILED';
   });
   const authToken = 'test-third-party-auth-token-not-real';
   const tokenFailure = await setup(t, 'unused', {
@@ -79,7 +101,7 @@ test('provider output is bounded and errors redact credentials', async t => {
   await assert.rejects(tokenFailure.run({ imagePath: tokenFailure.imagePath, jobDir: tokenFailure.jobDir, provider: 'claude', prompt: 'test' }), e => {
     assert.doesNotMatch(e.message, new RegExp(authToken));
     assert.match(e.message, /\[redacted\]/);
-    return e.code === 'AI_PROCESS_FAILED';
+    return e.code === 'AI_AUTH_FAILED';
   });
 });
 
@@ -124,7 +146,7 @@ test('Claude errors redact ANTHROPIC_AUTH_TOKEN values', async t => {
     extraEnv: { ANTHROPIC_AUTH_TOKEN: authToken }
   });
   await assert.rejects(run({ ...input, provider: 'claude', prompt: 'test' }), error => {
-    assert.equal(error.code, 'AI_PROCESS_FAILED');
+    assert.equal(error.code, 'AI_AUTH_FAILED');
     assert.doesNotMatch(error.message, new RegExp(authToken));
     assert.match(error.message, /\[redacted\]/);
     return true;
