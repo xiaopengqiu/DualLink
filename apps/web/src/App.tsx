@@ -38,6 +38,9 @@ export default function App() {
   const interviewEvents = useMemo(() => new InterviewEventHub(), []);
   const [user, setUser] = useState<User | null>(null);
   const [booting, setBooting] = useState(true);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [page, setPage] = useState<Page>(initialPair ? 'devices' : initialInterview ? 'interviews' : 'workspace');
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [captures, setCaptures] = useState<Capture[]>([]);
@@ -93,11 +96,13 @@ export default function App() {
 
   useEffect(() => {
     const abort = new AbortController();
+    setBootError(null);
+    setBooting(true);
     api.request<{ user: User; csrfToken: string }>('/auth/me', { signal: abort.signal }).then(result => {
       if (!abort.signal.aborted) { api.setCsrfToken(result.csrfToken); setUser(result.user); }
-    }).catch(error => { if (!(error instanceof ApiError && error.status === 401) && !abort.signal.aborted) handleError(error); }).finally(() => { if (!abort.signal.aborted) setBooting(false); });
+    }).catch(error => { if (!(error instanceof ApiError && error.status === 401) && !abort.signal.aborted) { setBootError(error instanceof Error ? error.message : '无法连接云端服务，请稍后重试'); handleError(error); } }).finally(() => { if (!abort.signal.aborted) setBooting(false); });
     return () => abort.abort();
-  }, [handleError]);
+  }, [handleError, bootstrapAttempt]);
 
   const loadWorkspace = useCallback(async () => {
     const currentUserId = userIdRef.current;
@@ -114,13 +119,13 @@ export default function App() {
       setCaptures(nextCaptures); setTasks(nextTasks); setDevices(deviceResult.devices); setPrompts(promptResult.prompts); setKnowledge(knowledgeResult.files);
       setSelectedId(current => nextCaptures.some(capture => capture.id === current) ? current : nextCaptures[0]?.id || null);
       setPromptId(current => promptResult.prompts.some(prompt => prompt.id === current) ? current : promptResult.prompts.find(prompt => prompt.isDefault)?.id || promptResult.prompts[0]?.id || '');
-    } catch (error) { if (userIdRef.current === currentUserId) handleError(error); }
+    } catch (error) { if (userIdRef.current === currentUserId) { setWorkspaceError(error instanceof Error ? error.message : '工作空间数据加载失败，请重试'); handleError(error); } }
   }, [handleError]);
 
   useEffect(() => {
     // Everything below belongs to one account, including transient form and blob state.
     // Reset on both logout and a direct account-ID change before loading the next workspace.
-    setConfig(null); setCaptures([]); setTasks([]); setSelectedId(null);
+    setConfig(null); setWorkspaceError(null); setCaptures([]); setTasks([]); setSelectedId(null);
     setDevices([]); setPrompts([]); setKnowledge([]); setUsers([]);
     setLocalPreview(null); setQuestion(''); setHistoryQuery(''); setPromptId('');
     openedHistoryCapture.current=null;deletedCaptureIds.current.clear();deletedTaskIds.current.clear();setHistoryInterviewId(initialInterview);setHistoryRevision(0);
@@ -135,9 +140,9 @@ export default function App() {
     if (!user) { setLoading(false); return; }
     let cancelled = false;
     setLoading(true);
-    void Promise.all([loadWorkspace(), api.request<AppConfig>('/config').then(result => { if (!cancelled) { setConfig(result); setProvider(result.screenshotPreferences?.provider||result.defaultProvider); setScreenshotModels({codex:result.screenshotPreferences?.models.codex||'',claude:result.screenshotPreferences?.models.claude||''}); } })]).catch(handleError).finally(() => { if (!cancelled) setLoading(false); });
+    void Promise.all([loadWorkspace(), api.request<AppConfig>('/config').then(result => { if (!cancelled) { setConfig(result); setProvider(result.screenshotPreferences?.provider||result.defaultProvider); setScreenshotModels({codex:result.screenshotPreferences?.models.codex||'',claude:result.screenshotPreferences?.models.claude||''}); } }).catch(error => { if (!cancelled) { setWorkspaceError(error instanceof Error ? error.message : '工作空间配置加载失败，请重试'); throw error; } })]).catch(handleError).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [user?.id, initialPair, initialInterview, handleError, loadWorkspace]);
+  }, [user?.id, initialPair, initialInterview, handleError, loadWorkspace, bootstrapAttempt]);
 
   const applyHistoryEvent=useCallback((event:HistoryEvent)=>{
     setHistoryRevision(value=>value+1);
@@ -277,6 +282,7 @@ export default function App() {
   };
 
   if (booting) return <div className="boot-screen"><Brand /><Spinner label="正在连接你的工作台" /></div>;
+  if (bootError) return <div className="boot-screen"><Brand /><div className="boot-error" role="alert"><h2>工作台暂时无法打开</h2><p>{bootError}</p><button className="button primary" onClick={() => setBootstrapAttempt(value => value + 1)}><RefreshCw size={16} />重新连接</button></div></div>;
   if (!user) return <LoginScreen onLogin={(nextUser, token) => { api.setCsrfToken(token); setUser(nextUser); setPage(initialPair ? 'devices' : initialInterview ? 'interviews' : 'workspace'); }} notify={notify} />;
 
   const navigate = (next: Page) => { setPage(next); setHistoryQuery(''); };
@@ -287,6 +293,8 @@ export default function App() {
   };
   const nav = [{ id: 'workspace' as const, title: '截图工作台', icon: <LayoutDashboard size={19} /> }, { id: 'interviews' as const, title: '面试会话', icon: <AudioLines size={19} /> }, {id:'history' as const,title:'历史记录',icon:<HistoryIcon size={19}/>}, { id: 'devices' as const, title: '连接设备', icon: <Monitor size={19} /> }, { id: 'prompts' as const, title: '回答风格', icon: <Sparkles size={19} /> }, { id: 'knowledge' as const, title: '我的知识库', icon: <BookOpen size={19} /> }];
 
+  if (loading && !workspaceError) return <div className="boot-screen"><Brand /><Spinner label="正在加载你的工作空间" /></div>;
+  if (workspaceError || !config) return <div className="boot-screen"><Brand /><div className="boot-error" role="alert"><h2>工作空间数据加载失败</h2><p>{workspaceError || '工作空间配置暂时不可用，请重试。'}</p><button className="button primary" onClick={() => setBootstrapAttempt(value => value + 1)}><RefreshCw size={16} />重新加载</button></div></div>;
   return <div className="app-shell">
     <aside className="sidebar">
       <Brand light />

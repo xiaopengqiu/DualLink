@@ -26,6 +26,7 @@ export default defineConfig({
   projects: [
     { name: 'desktop', use: { viewport: { width: 1440, height: 1000 } } },
     { name: 'tablet', use: { viewport: { width: 820, height: 1180 }, hasTouch: true } },
-    { name: 'tablet-landscape', use: { viewport: { width: 1180, height: 820 }, hasTouch: true } }
+    { name: 'tablet-landscape', use: { viewport: { width: 1180, height: 820 }, hasTouch: true } },
+    { name: 'ipad-webkit', use: { browserName: 'webkit', viewport: { width: 768, height: 1024 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true, launchOptions: {}, userAgent: 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1' } }
   ]
 });

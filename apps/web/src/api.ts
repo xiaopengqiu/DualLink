@@ -30,13 +30,24 @@ export class ApiClient {
       throw new ApiError('无法连接云端服务，请检查网络后重试', 0);
     }
     assertCurrentSession();
-    const data = await response.json().catch(error => {
-      assertCurrentSession();
-      if (error instanceof DOMException && error.name === 'AbortError') throw error;
-      return {};
-    });
+    // Reverse proxies can return HTML/plain text instead of JSON.
+    const text = await response.text();
     assertCurrentSession();
-    if (!response.ok) throw new ApiError(typeof data.error === 'string' ? data.error : `请求失败（${response.status}）`, response.status, data.code);
+    let data: Record<string, unknown> = {};
+    let invalidJson = false;
+    if (text) {
+      try { data = JSON.parse(text) as Record<string, unknown>; }
+      catch { invalidJson = true; data = { error: text.trim() }; }
+    }
+    assertCurrentSession();
+    if (response.ok && (invalidJson || data === null || typeof data !== 'object' || Array.isArray(data))) {
+      throw new ApiError(`接口 ${path} 返回无效响应（${response.status}）`, response.status);
+    }
+    if (!response.ok) {
+      const serverMessage = data && typeof data === 'object' && !Array.isArray(data) && typeof data.error === 'string' ? data.error.trim() : '';
+      const safeMessage = serverMessage && !/<(?:html|body|script)\b/i.test(serverMessage) ? serverMessage.slice(0, 240) : '';
+      throw new ApiError(safeMessage || `请求 ${path} 失败（${response.status}）`, response.status, data && typeof data === 'object' && !Array.isArray(data) && typeof data.code === 'string' ? data.code : undefined);
+    }
     return data as T;
   }
 }
